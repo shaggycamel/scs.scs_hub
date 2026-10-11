@@ -1,13 +1,23 @@
 import logging
 import configparser
+import re
 import sqlalchemy
 import polars as pl
+from collections import defaultdict
 
 from scs_hub.config import credentials_path, ensure_credentials_file
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 3 * 60  # connection timeout, seconds
+
+# Schemas carrying readable data. Read-only roles are granted SELECT on these,
+# never on Cockroach's own crdb_internal/pg_* schemas.
+READ_SCHEMAS = ("nba", "fty", "statyx", "util")
+
+# Identifiers are interpolated into GRANT/DDL, which cannot take bind
+# parameters, so they are validated rather than quoted.
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class Database:
     """
@@ -116,6 +126,62 @@ class Database:
         with self.engine.connect() as conn:
             conn.execute(sqlalchemy.sql.text(statement))
             conn.commit()
+
+    def regrant_read(
+        self,
+        role: str | list[str] | tuple[str, ...] = "kobe_public",
+        schemas: tuple[str, ...] = READ_SCHEMAS,
+    ) -> list[str]:
+        """
+        Re-grant SELECT to one or more read-only roles on every table and view in
+        the data schemas. role is a name or a list/tuple of names, granted in a
+        single statement (GRANT ... TO a, b).
+
+        Dropping and recreating a view or table discards the grants attached to
+        it, so a role such as kobe_public (the Cockroach read-only user) loses
+        access to exactly the objects that were rebuilt. This sweeps the schemas
+        and grants SELECT again; it is idempotent, so it is safe to run after any
+        rebuild.
+
+        Base tables and views are both enumerated from information_schema.tables
+        rather than trusting GRANT ... ON ALL TABLES IN SCHEMA, which Cockroach's
+        docs describe as covering tables and sequences and do not promise views.
+        Schemas absent from this connection (e.g. Cockroach has no fty) are
+        skipped and logged. Returns the schemas that were granted.
+        """
+        roles = (role,) if isinstance(role, str) else tuple(role)
+        if not roles:
+            raise ValueError("regrant_read: role must be a name or a non-empty list/tuple")
+        for ident in (*roles, *schemas):
+            if not _IDENT.match(ident):
+                raise ValueError(f"regrant_read: unsafe identifier {ident!r}")
+        role_list = ", ".join(roles)
+
+        objects = self.read(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            f"WHERE table_schema IN ({', '.join(repr(s) for s in schemas)}) "
+            "ORDER BY table_schema, table_name"
+        )
+
+        by_schema: dict[str, list[str]] = defaultdict(list)
+        for r in objects.iter_rows(named=True):
+            by_schema[r["table_schema"]].append(r["table_name"])
+
+        granted = []
+        for schema in schemas:
+            names = by_schema.get(schema)
+            if not names:
+                logger.warning("regrant_read: no tables/views in %s — skipped", schema)
+                continue
+            targets = ", ".join(f'"{schema}"."{name}"' for name in names)
+            self.execute(f"GRANT SELECT ON TABLE {targets} TO {role_list}")
+            granted.append(schema)
+            logger.info(
+                "regrant_read: SELECT on %d object(s) in %s granted to %s",
+                len(names), schema, role_list,
+            )
+
+        return granted
 
     def deduplicate_tables(self, season: str, dry_run: bool = False) -> list[str]:
         """
