@@ -746,10 +746,14 @@ merges are not yet applied.
   table — deleting every espn mapping and re-resolving lost 23 of them and
   minted 21 spurious players. **So back up `player_source_id`; the retired table
   is a convenience, not the system of record.**
-- `utility.deduplicate_tables` is unused but not broken: its body correctly
-  reads `self.db` / `self.ctx.cur_season`. Kept as a self-contained utility;
-  the earlier note calling it pre-split god-object code no longer applied once
-  the components were separated.
+- `Database.deduplicate_tables` is unused but not broken. It lives on the
+  connection, not `UtilComponent`, because it rewrites any table with a `season`
+  column whatever its schema — schema-agnostic maintenance, not a `util.*`
+  concern. `season` is now required (the `Database` has no `Context`), so callers
+  pass `ctx.cur_season`.
+
+`util.*` remains owned by `UtilComponent`; the name fold (`norm_name()` and its
+helpers) stays in `utility.py`, since only that module's functions use it.
 
 ## league_byes: fixed and backfilled for every ESPN league-season
 

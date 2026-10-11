@@ -116,3 +116,77 @@ class Database:
         with self.engine.connect() as conn:
             conn.execute(sqlalchemy.sql.text(statement))
             conn.commit()
+
+    def deduplicate_tables(self, season: str, dry_run: bool = False) -> list[str]:
+        """
+        Remove exact duplicate rows, one season at a time, from every table on
+        this connection that has a season column.
+
+        Schema-agnostic maintenance rather than a util.* concern: it rewrites any
+        table carrying a season column, whatever its schema, which is why it lives
+        on the connection rather than a domain component. season is required — the
+        Database has no Context — so callers pass ctx.cur_season.
+
+        Scoped to a season because that is the only partition every candidate
+        table shares, and it keeps each rewrite small: the method reads one
+        season, drops duplicate rows in Polars, then replaces just that season
+        inside a transaction, so a failure leaves the table as it was.
+
+        Only tables carrying a season column are considered, so anything keyed
+        differently — util.player, util.player_source_id, util.table_column_order
+        — is skipped rather than silently rewritten. Views and _RETIRED tables are
+        excluded by name.
+
+        Beware what "duplicate" means here: it is an exact match across every
+        column, and the table is rewritten from the deduplicated frame. A table
+        where identical rows are legitimately distinct records would lose data, so
+        dry_run=True first — it logs and returns what would change without
+        writing anything.
+
+        Returns the list of tables affected (or that would be, under dry_run).
+        """
+        tables = self.read(
+            "SELECT DISTINCT table_schema, table_name "
+            "FROM information_schema.columns "
+            "WHERE column_name = 'season' "
+            "  AND table_name NOT LIKE '%\\_vw' ESCAPE '\\' "
+            "  AND table_name NOT ILIKE '%\\_retired' ESCAPE '\\'"
+        )
+        names = sorted(
+            f"{r['table_schema']}.{r['table_name']}" for r in tables.iter_rows(named=True)
+        )
+        logger.info(
+            "deduplicate_tables: %d candidate table(s) for season %s%s",
+            len(names), season, " (dry run)" if dry_run else "",
+        )
+
+        changed = []
+        for table in names:
+            df = self.read(f"SELECT * FROM {table} WHERE season = '{season}'")
+
+            # maintain_order so a rewrite is deterministic rather than reordering
+            # the season's rows on every run.
+            deduped = df.unique(maintain_order=True)
+            if deduped.height == df.height:
+                continue
+
+            changed.append(table)
+            logger.info(
+                "%s: %d row(s) -> %d, dropping %d duplicate(s)%s",
+                table, df.height, deduped.height, df.height - deduped.height,
+                " (dry run, not written)" if dry_run else "",
+            )
+            if dry_run:
+                continue
+
+            # One transaction: the delete and the rewrite either both land or
+            # neither does, so an interrupted run cannot leave a season empty.
+            with self.engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.sql.text(f"DELETE FROM {table} WHERE season = '{season}'")
+                )
+                deduped.write_database(table, conn, if_table_exists="append")
+
+        if not changed:
+            logger.info("deduplicate_tables: no duplicates found")
+        return changed
