@@ -12,6 +12,23 @@ import nba_api.stats.endpoints as nba_ep
 
 logger = logging.getLogger(__name__)
 
+_SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+
+# Columns _upcoming_games produces end to end. Returned with zero rows when the
+# CDN is unusable, so the concat and conform in get_game_schedule still see a
+# frame of the right shape.
+_UPCOMING_GAMES_SCHEMA = {
+    "game_id": pl.Int64,
+    "game_date": pl.Date,
+    "matchup": pl.String,
+    "season": pl.String,
+    "team_winner": pl.String,
+    "team_loser": pl.String,
+    "team": pl.String,
+    "opponent": pl.String,
+    "home": pl.Boolean,
+}
+
 
 class NBAComponent:
     """Official NBA stats — writes into the nba.* schema."""
@@ -195,11 +212,23 @@ class NBAComponent:
                 try:
                     nbainjuries._parser.validate_injrepurl(nbainjuries.injury.gen_url(tm))
                     return tm
-                except (requests.exceptions.HTTPError, Exception):
+                except Exception:
                     continue
+            return None
+
+        # No valid report URL means either the slate is dark or nbainjuries' URL
+        # scheme has moved; either way there is nothing to write, and passing the
+        # None through raised TypeError inside get_reportdata and failed the run.
+        valid_time = get_valid_time()
+        if valid_time is None:
+            logger.warning(
+                "nba.injuries: no injury report available for %s, skipping",
+                dt_est.date(),
+            )
+            return
 
         df = (
-            pl.from_pandas(nbainjuries.injury.get_reportdata(get_valid_time(), return_df=True))
+            pl.from_pandas(nbainjuries.injury.get_reportdata(valid_time, return_df=True))
             .clean_names(case_type="snake")
             .filter(
                 (pl.col("reason") != "NOT YET SUBMITTED") & (pl.col("player_name").is_not_null())
@@ -510,11 +539,24 @@ class NBAComponent:
 
     def _upcoming_games(self, season: str, played_ids: pl.DataFrame) -> pl.DataFrame:
         """Not-yet-played games for a season, from the NBA's static schedule JSON."""
-        request = requests.get("https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json")
+        request = None
+        try:
+            request = requests.get(_SCHEDULE_URL, timeout=30)
+            request.raise_for_status()
+            payload = request.json()
+        except (requests.exceptions.RequestException, ValueError):
+            logger.warning(
+                "nba.league_game_schedule: schedule CDN unusable "
+                "(status=%s, body starts %r) — treating as no upcoming games",
+                getattr(request, "status_code", None),
+                getattr(request, "content", b"")[:200],
+            )
+            return pl.DataFrame(schema=_UPCOMING_GAMES_SCHEMA)
+
         key_dates = self.db.read(f"SELECT * FROM nba.key_dates WHERE season = '{season}'")
 
         dfs = []
-        for game_date in request.json()["leagueSchedule"]["gameDates"]:
+        for game_date in payload["leagueSchedule"]["gameDates"]:
             for game in game_date["games"]:
                 dfs.append(
                     {
@@ -623,19 +665,37 @@ class NBAComponent:
 
         logger.info("nba.team_roster")
         dfs = []
-        for team in teams:
-            common_teamroster = nba_ep.commonteamroster.CommonTeamRoster(
-                season=self.ctx.cur_season_year, team_id=team
-            )
-            dfs.append(pl.from_pandas(common_teamroster.get_data_frames()[0]))
-            ix = teams.index(team)
+        failed = []
+        for ix, team in enumerate(teams):
+            # stats.nba.com intermittently answers CommonTeamRoster with an empty
+            # body, which nba_api surfaces as a JSONDecodeError. Unguarded, one
+            # such team aborts the loop and loses every roster in the run, so a
+            # bad team is skipped and named rather than ending the fetch.
+            try:
+                common_teamroster = nba_ep.commonteamroster.CommonTeamRoster(
+                    season=self.ctx.cur_season_year, team_id=team
+                )
+                dfs.append(pl.from_pandas(common_teamroster.get_data_frames()[0]))
+            except Exception:
+                logger.exception("team_id %s failed", team)
+                failed.append(team)
             if ix % 5 == 0:
-                logger.debug("team:", ix, "/", len(teams))
+                logger.debug("team: %d / %d", ix, len(teams))
             time.sleep(1)
-        logger.debug("team:", ix, "/", len(teams))
+        logger.debug("team: %d / %d", len(teams), len(teams))
+
+        if failed:
+            logger.warning("team_roster: %d team(s) failed: %s", len(failed), failed)
+
+        if not dfs:
+            logger.error("team_roster: nothing fetched, skipping write")
+            return
 
         df = (
-            pl.concat(dfs)
+            # diagonal_relaxed for the same reason as get_player_info: the
+            # CommonTeamRoster column set is not stable across teams, so a plain
+            # concat raises ShapeError on the first pair that disagrees.
+            pl.concat(dfs, how="diagonal_relaxed")
             .clean_names(case_type="snake")
             .with_columns(
                 [
@@ -646,9 +706,15 @@ class NBAComponent:
                     pl.lit(None).cast(pl.Date).alias("exit_date"),
                 ]
             )
-            .join(self.ctx.nba_teams, left_on="teamid", right_on="id", how="left")
-            .rename({"teamid": "team_id", "abbreviation": "team_slug"})
+            .join(self.ctx.nba_teams, left_on="team_id", right_on="id", how="left")
+            .rename({"abbreviation": "team_slug"})
         )
+
+        # Shape to the table now, not just at write time: the traded-player branch
+        # below concats this frame against the stored table, and the raw API frame
+        # is far wider than the registered columns, so an unconformed concat raises
+        # ShapeError before any write is reached.
+        df = self.db.conform(df, "team_roster", "nba")
 
         if pre_season:
             self.db.write_ordered(df, "team_roster", schema="nba")
@@ -668,6 +734,15 @@ class NBAComponent:
                 .otherwise(pl.col("exit_date"))
                 .alias("exit_date")
             )
+
+            if df_existing.is_empty():
+                # No snapshot stored for the season yet — the very first
+                # non-preseason run, or a season the table has never seen.
+                # There are no trades to diff against, so persist this snapshot;
+                # concat below would otherwise join against a 0-row frame whose
+                # inferred Null dtypes cannot match the new frame's String season.
+                self.db.write_ordered(df, "team_roster", schema="nba")
+                return
 
             df_traded = (
                 pl.concat([df, df_existing])
@@ -696,3 +771,5 @@ class NBAComponent:
                 logger.info("nba.team_roster traded players have been updated (%d rows)", len(df_traded))
             else:
                 logger.info("nba.team_roster: nothing to update")
+
+
