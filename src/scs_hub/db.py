@@ -15,6 +15,35 @@ TIMEOUT = 3 * 60  # connection timeout, seconds
 # never on Cockroach's own crdb_internal/pg_* schemas.
 READ_SCHEMAS = ("nba", "fty", "statyx", "util")
 
+# Schemas carried by transport_from, in the order they are moved. The order mirrors
+# util.update_schedule's schema_sequence: nba box scores feed fty's matchup box score.
+TRANSPORT_SCHEMAS = ("nba", "statyx", "fty", "util", "anl")
+
+# Tables whose partition key is not a season column, so it cannot be inferred. Every
+# other table that carries a season column moves by season; a table that carries neither
+# is skipped rather than guessed at.
+TRANSPORT_STRATEGY = {
+    ("nba", "player_box_score"): "game_id",
+    ("nba", "team_box_score"): "game_id",
+    ("nba", "injuries"): "game_date",
+    ("nba", "teams"): "full",
+    ("fty", "category_label"): "full",
+    ("fty", "free_agents"): "full",
+    ("util", "nba_fty_name_match"): "full",
+    ("util", "table_column_order"): "full",
+    ("util", "update_log"): "full",
+    ("util", "update_schedule"): "full",
+    ("anl", "pts_prediction"): "full",
+}
+
+# Identity tables are keyed by player_key, not season, and the target's copy may carry
+# review work the source has never seen — never overwrite them.
+TRANSPORT_SKIP = {
+    ("util", "player"),
+    ("util", "player_source_id"),
+    ("util", "player_identity_review"),
+}
+
 # Identifiers are interpolated into GRANT/DDL, which cannot take bind
 # parameters, so they are validated rather than quoted.
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -256,3 +285,144 @@ class Database:
         if not changed:
             logger.info("deduplicate_tables: no duplicates found")
         return changed
+
+    def transport_from(
+        self,
+        source: "Database",
+        season: str,
+        schemas: tuple[str, ...] = TRANSPORT_SCHEMAS,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """
+        Copy one season's rows from another database into this one, table by table.
+
+        This is the routine the postgres -> Cockroach mirror runs, and it lives here for
+        the same reason deduplicate_tables does: it is a schema-agnostic rewrite of whole
+        tables between two connections, not a domain concern. self is the destination;
+        source is the database to copy from. Reads go through source, writes through self.
+
+        Which tables and how much of each is inferred rather than listed: any table with a
+        season column moves that season's rows; TRANSPORT_STRATEGY overrides the irregular
+        few (box scores are keyed by game_id, injuries by game_date, the reference tables
+        are replaced whole); a table with neither a season column nor an override is
+        skipped, so nothing is guessed at. TRANSPORT_SKIP keeps the identity tables out —
+        their target copy may carry review work the source has never seen.
+
+        Each table is delete-then-append (never DROP: a dropped table would take dependent
+        views with it, and views are apply_views.py's job, grants regrant_read's). delete
+        is scoped to exactly the rows read, so a failure between the read and the write
+        leaves the target as it was for that table.
+
+        Returns {schema.table: rows moved}. Raises after moving the rest if any table
+        failed, so a partial run is visible rather than silent.
+        """
+        if source.engine is None:
+            raise ValueError("transport_from: the source Database has no connection")
+        if self.engine is None:
+            raise ValueError("transport_from: this Database has no connection")
+
+        schema_list = ", ".join(repr(s) for s in schemas)
+        columns = source.read(
+            "SELECT table_schema, table_name, column_name FROM information_schema.columns "
+            f"WHERE table_schema IN ({schema_list})"
+        )
+        season_tables = {
+            (s, t)
+            for s, t, c in zip(
+                columns["table_schema"], columns["table_name"], columns["column_name"]
+            )
+            if c == "season"
+        }
+
+        found = source.read(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            f"WHERE table_schema IN ({schema_list}) "
+            "AND table_type = 'BASE TABLE' "
+            "AND table_name NOT ILIKE '%\\_retired' ESCAPE '\\'"
+        )
+        ordered = sorted(
+            ((r["table_schema"], r["table_name"]) for r in found.iter_rows(named=True)),
+            key=lambda st: (schemas.index(st[0]), st[1]),
+        )
+
+        moved: dict[str, int] = {}
+        failed: list[str] = []
+        for schema, table in ordered:
+            key = f"{schema}.{table}"
+            if (schema, table) in TRANSPORT_SKIP:
+                logger.info("transport: skipped %s (identity table)", key)
+                continue
+            strategy = TRANSPORT_STRATEGY.get((schema, table))
+            if strategy is None and (schema, table) in season_tables:
+                strategy = "season"
+            if strategy is None:
+                logger.info("transport: skipped %s (no season column)", key)
+                continue
+            try:
+                moved[key] = self._transport_table(source, schema, table, strategy, season, dry_run)
+            except Exception:
+                logger.exception("transport: %s (%s) failed", key, strategy)
+                failed.append(key)
+
+        if failed:
+            raise RuntimeError(f"transport: {len(failed)} table(s) failed: {', '.join(failed)}")
+        logger.info(
+            "transport: %d table(s) from %s%s",
+            len(moved), season, " (dry run)" if dry_run else "",
+        )
+        return moved
+
+    def _transport_table(
+        self,
+        source: "Database",
+        schema: str,
+        table: str,
+        strategy: str,
+        season: str,
+        dry_run: bool,
+    ) -> int:
+        """Move one table's rows for season under the given strategy, returning the count."""
+        where = self._transport_where(source, schema, table, strategy, season)
+        if where is None:
+            return 0
+
+        frame = source.read(f"SELECT * FROM {schema}.{table} WHERE {where}")
+        logger.info(
+            "transport: %s.%s (%s) %d row(s)%s",
+            schema, table, strategy, frame.height, " (dry run, not written)" if dry_run else "",
+        )
+        if dry_run:
+            return frame.height
+
+        # Delete exactly the rows read, then append. A table the target lacks yet is
+        # skipped by delete_where and created by write.
+        self.delete_where(table, schema, where)
+        if frame.height:
+            self.write(frame, table, schema=schema)
+        return frame.height
+
+    def _transport_where(
+        self,
+        source: "Database",
+        schema: str,
+        table: str,
+        strategy: str,
+        season: str,
+    ) -> str | None:
+        """The predicate selecting season's rows, or None when there are none to move."""
+        if strategy == "season":
+            return f"season = '{season}'"
+        if strategy == "game_date":
+            return f"game_date >= '{season[:4]}-06-01'"
+        if strategy == "full":
+            return "true"
+        if strategy == "game_id":
+            ids = source.read(
+                "SELECT DISTINCT game_id FROM nba.league_game_schedule "
+                f"WHERE season = '{season}'"
+            )["game_id"].to_list()
+            if not ids:
+                logger.info("transport: %s.%s has no games for %s", schema, table, season)
+                return None
+            return f"game_id IN ({', '.join(str(int(g)) for g in ids)})"
+        raise ValueError(f"transport_from: unknown strategy {strategy!r} for {schema}.{table}")
