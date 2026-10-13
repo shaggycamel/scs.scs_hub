@@ -18,6 +18,7 @@ _SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.j
 # CDN is unusable, so the concat and conform in get_game_schedule still see a
 # frame of the right shape.
 _UPCOMING_GAMES_SCHEMA = {
+    "season_type": pl.String,
     "game_id": pl.Int64,
     "game_date": pl.Date,
     "matchup": pl.String,
@@ -537,8 +538,12 @@ class NBAComponent:
 
         return df
 
-    def _upcoming_games(self, season: str, played_ids: pl.DataFrame) -> pl.DataFrame:
-        """Not-yet-played games for a season, from the NBA's static schedule JSON."""
+    def _upcoming_games(self, season: str, played_ids: pl.DataFrame) -> pl.DataFrame | None:
+        """Not-yet-played games for a season, from the NBA's static schedule JSON.
+
+        Returns None when the CDN is unusable, so the caller can tell "fetch
+        failed" apart from "no upcoming games" and avoid wiping stored rows.
+        """
         request = None
         try:
             request = requests.get(_SCHEDULE_URL, timeout=30)
@@ -547,11 +552,11 @@ class NBAComponent:
         except (requests.exceptions.RequestException, ValueError):
             logger.warning(
                 "nba.league_game_schedule: schedule CDN unusable "
-                "(status=%s, body starts %r) — treating as no upcoming games",
+                "(status=%s, body starts %r) — keeping stored upcoming games",
                 getattr(request, "status_code", None),
                 getattr(request, "content", b"")[:200],
             )
-            return pl.DataFrame(schema=_UPCOMING_GAMES_SCHEMA)
+            return None
 
         key_dates = self.db.read(f"SELECT * FROM nba.key_dates WHERE season = '{season}'")
 
@@ -650,12 +655,20 @@ class NBAComponent:
                 f"WHERE season = '{season}' AND team_winner IS NOT NULL"
             )
             df = self._upcoming_games(season, played)
+            if df is None:
+                # The CDN refused the request; keep the undecided rows we already
+                # have rather than replacing them with nothing.
+                logger.warning("nba.league_game_schedule: upcoming refresh skipped")
+                return
             self.db.delete_where(
                 "league_game_schedule", "nba", f"season = '{season}' AND team_winner IS NULL"
             )
         else:
             played = self._played_games(season)
-            df = pl.concat([played, self._upcoming_games(season, played)], how="diagonal_relaxed")
+            upcoming = self._upcoming_games(season, played)
+            if upcoming is None:
+                upcoming = pl.DataFrame(schema=_UPCOMING_GAMES_SCHEMA)
+            df = pl.concat([played, upcoming], how="diagonal_relaxed")
             self.db.delete_where("league_game_schedule", "nba", f"season = '{season}'")
 
         self.db.write_ordered(df, "league_game_schedule", schema="nba")

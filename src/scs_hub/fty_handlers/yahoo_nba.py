@@ -1,9 +1,18 @@
+import logging
 import time
 import datetime as dt
 import polars as pl
 from yfpy.query import YahooFantasySportsQuery as yfpy
 
 from scs_hub.fty_handlers.base import FtyHandler
+
+# Importing yfpy pulls in yahoo_oauth, which calls logging.setLoggerClass(YahooLogger)
+# at module scope (yahoo_oauth/oauth.py). YahooLogger hard-codes DEBUG and adds its own
+# StreamHandler, so every logger created afterwards — SQLAlchemy's engine/pool loggers
+# among them — starts echoing debug SQL and every record prints twice. Restore the stock
+# class so later loggers are normal, and quiet SQLAlchemy's verbose echo.
+logging.setLoggerClass(logging.Logger)
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
 
 
 class YahooNbaHandler(FtyHandler):

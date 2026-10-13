@@ -94,9 +94,15 @@ class FtyComponent:
         )
 
         if season == self.ctx.cur_season:
+            # Cast first: a season with no derived dates yet (pre-season) makes the
+            # LEFT JOIN's finish_date an all-null column, which Polars types as Null —
+            # and Null + duration is an InvalidOperationError, not a null. Casting to
+            # Date keeps the arithmetic valid (all-null stays all-null) so the
+            # is_not_null guard can do its job.
+            finish_date = pl.col("finish_date").cast(pl.Date)
             finished = (
-                pl.col("finish_date").is_not_null()
-                & ((pl.col("finish_date") + pl.duration(days=1)) < pl.lit(self.ctx.date_est))
+                finish_date.is_not_null()
+                & ((finish_date + pl.duration(days=1)) < pl.lit(self.ctx.date_est))
             )
             for r in leagues.filter(finished).iter_rows(named=True):
                 logger.info(

@@ -5,6 +5,66 @@ gives the symptom, the code path, the cause, and the fix. `scs.nba.database`
 (`__main__.py`) records one `util.update_log` row per object, so a failure is the
 object's row with `success = false` plus the run exiting non-zero.
 
+## 2026-10-13 — `fty.connect_leagues`: `InvalidOperationError` adding a duration to a null date
+
+Found in local testing against `postgres`.
+
+- **Symptom**
+
+  ```
+  polars.exceptions.InvalidOperationError: + not allowed on null and duration[μs]
+  ```
+
+  Raised from `FtyComponent._registered_leagues`.
+
+- **Where** — `src/scs_hub/fty.py`, `_registered_leagues`, the finished-season filter.
+
+- **Cause** — a season with no derived matchup dates yet (pre-season, e.g. `2026-27`)
+  makes the `LEFT JOIN ... MAX(matchup_end)` produce an all-null `finish_date`, which
+  Polars types as `Null`. The filter then evaluates
+  `pl.col("finish_date") + pl.duration(days=1)` across the whole column; because both
+  sides of `&` are evaluated (no short-circuit), the addition runs on the `Null` column
+  and raises before the `is_not_null()` guard can exclude it. It only bites when the
+  season in question has zero matchup dates; a season with any dates gives `finish_date`
+  a `Date` type and works.
+
+- **Fix** — cast `finish_date` to `pl.Date` before the arithmetic, so an all-null column
+  stays valid (all-null in, all-null out) and the `is_not_null()` guard filters it out as
+  intended.
+
+## 2026-10-13 — `nba.league_game_schedule`: `ColumnNotFoundError` on `season_type`
+
+Found in local testing against `postgres`, following the CDN guard below.
+
+- **Symptom**
+
+  ```
+  polars.exceptions.ColumnNotFoundError: unable to find column "season_type";
+  valid columns: ["game_id", "game_date", "matchup", "season", "team_winner",
+  "team_loser", "team", "opponent", "home"]
+  ```
+
+  Raised from `Database.conform` (via `write_ordered`) in
+  `NBAComponent.get_game_schedule`.
+
+- **Where** — `src/scs_hub/nba.py`, `_upcoming_games` and `get_game_schedule`.
+
+- **Cause** — the CDN guard returns `pl.DataFrame(schema=_UPCOMING_GAMES_SCHEMA)`,
+  but that schema omitted `season_type`, which the table's `util.table_column_order`
+  registration and the live table both require. The full path hid this because the
+  played frame supplies `season_type` and `pl.concat(..., how="diagonal_relaxed")`
+  backfills it; the `upcoming_only=True` path writes the upcoming frame on its own,
+  so the conform's `select` raised. The pre-season full path (no played games yet)
+  had the same exposure. Separately, on CDN refusal `upcoming_only` deleted the
+  undecided rows before writing the empty frame, so a down CDN wiped upcoming games
+  instead of leaving them.
+
+- **Fix** — add `season_type` (nullable `String`) to `_UPCOMING_GAMES_SCHEMA`, and
+  have `_upcoming_games` return `None` on a CDN failure so the caller can tell a
+  failed fetch from an empty one. `get_game_schedule` now substitutes the empty
+  frame in the full path, and in `upcoming_only` skips the delete and write, leaving
+  stored upcoming games intact.
+
 ## 2026-10-12 — `nba.injuries`: `TypeError` when no injury report is available
 
 Found in local testing against `postgres`.
