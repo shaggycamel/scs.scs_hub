@@ -5,6 +5,65 @@ gives the symptom, the code path, the cause, and the fix. `scs.nba.database`
 (`__main__.py`) records one `util.update_log` row per object, so a failure is the
 object's row with `success = false` plus the run exiting non-zero.
 
+## 2026-10-13 — `fty.get_recent_activity`: `ColumnNotFoundError` for a league with no activity
+
+Found in local testing against `postgres`, for a new league with no activity yet.
+
+- **Symptom**
+
+  ```
+  polars.exceptions.ColumnNotFoundError: unable to find column "season";
+  valid columns: []
+  ```
+
+  Raised in `EspnNbaHandler.get_recent_activity`.
+
+- **Where** — `src/scs_hub/fty_handlers/espn_nba.py`, `get_recent_activity`.
+
+- **Cause** — a league with no activity builds `dfs = []`, so `pl.DataFrame(dfs)` is an
+  empty frame of **width 0**. The method then anti-joins it against the stored rows on
+  `df_already_done.columns` — keys the 0-column left frame doesn't have — raising. (An
+  empty `df_already_done` would likewise be all-`Null` and mismatched.)
+
+- **Fix** — build the frame with an explicit `_RECENT_ACTIVITY_SCHEMA` so an empty result
+  still carries the object's columns, and skip the anti-join when either side is empty.
+
+## 2026-10-13 — `fty.get_competitor_roster`: `ShapeError` / `SchemaError` before matchups start
+
+Found in local testing against `postgres`, for a new customer's 2026-27 league before
+its matchup dates begin.
+
+- **Symptom**
+
+  ```
+  polars.exceptions.ShapeError: unable to append to a DataFrame of width 11 with a
+  DataFrame of width 0
+  ```
+
+  and, once that was fixed:
+
+  ```
+  polars.exceptions.SchemaError: datatypes of join keys don't match - `platform`:
+  str on left does not match `platform`: null on right
+  ```
+
+- **Where** — `src/scs_hub/fty.py`, `get_competitor_roster` and the eight
+  `pl.concat(self._dispatch(...))` call sites.
+
+- **Cause** — two pre-season edges:
+
+  1. A league with no roster yet makes `EspnNbaHandler.get_competitor_roster` return
+     `pl.DataFrame([])` — an empty frame of **width 0**. `pl.concat` is strict, so one
+     such league among the connected ones raised `ShapeError`.
+  2. `league_matchup_dates` is read for the window covering `date_est`; before the
+     season's first matchup that window matches nothing, and an empty read types every
+     column as `Null`. The left join on `["platform", "league_id"]` then raised
+     `SchemaError` against the roster's `String`/`Int64` keys.
+
+- **Fix** — concat dispatch results with `how="diagonal_relaxed"` (tolerates the
+  zero-width frame and any column drift), and cast `platform`/`league_id` on the
+  matchup-dates frame before the join so an empty one still joins.
+
 ## 2026-10-13 — `fty.connect_leagues`: `InvalidOperationError` adding a duration to a null date
 
 Found in local testing against `postgres`.

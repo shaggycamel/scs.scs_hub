@@ -234,7 +234,7 @@ class FtyComponent:
             return
 
         self._delete_connected("league")
-        df = pl.concat(self._dispatch("get_league"))
+        df = pl.concat(self._dispatch("get_league"), how="diagonal_relaxed")
         self.db.write(df, "league", schema=self.schema)
         logger.info(f"{self.schema}.league has been updated (%d rows)", len(df))
 
@@ -244,7 +244,7 @@ class FtyComponent:
             return
 
         self._delete_connected("league_categories")
-        df = pl.concat(self._dispatch("get_league_categories"))
+        df = pl.concat(self._dispatch("get_league_categories"), how="diagonal_relaxed")
         self.db.write(df, "league_categories", schema=self.schema)
         logger.info(f"{self.schema}.league_categories has been updated (%d rows)", len(df))
 
@@ -254,7 +254,7 @@ class FtyComponent:
             return
 
         self._delete_connected("free_agents")
-        df = pl.concat(self._dispatch("get_free_agents"))
+        df = pl.concat(self._dispatch("get_free_agents"), how="diagonal_relaxed")
         self.db.write(df, "free_agents", schema=self.schema)
         logger.info(f"{self.schema}.free_agents has been updated (%d rows)", len(df))
 
@@ -264,7 +264,7 @@ class FtyComponent:
             return
 
         self._delete_connected("league_competitor")
-        df = pl.concat(self._dispatch("get_league_competitor"))
+        df = pl.concat(self._dispatch("get_league_competitor"), how="diagonal_relaxed")
         self.db.write(df, "league_competitor", schema=self.schema)
         logger.info(f"{self.schema}.league_competitor has been updated (%d rows)", len(df))
 
@@ -274,7 +274,7 @@ class FtyComponent:
             return
 
         self._delete_connected("league_matchup")
-        df = pl.concat(self._dispatch("get_league_matchup"))
+        df = pl.concat(self._dispatch("get_league_matchup"), how="diagonal_relaxed")
         self.db.write(df, "league_matchup", schema=self.schema)
         logger.info(f"{self.schema}.league_matchup has been updated (%d rows)", len(df))
 
@@ -299,13 +299,17 @@ class FtyComponent:
             logger.warning("No leagues connected — skipping get_league_matchup_dates")
             return
 
-        df = pl.concat(self._dispatch("get_league_matchup_dates"))
+        df = pl.concat(self._dispatch("get_league_matchup_dates"), how="diagonal_relaxed")
         self._delete_connected("league_matchup_dates")
         self.db.write(df, "league_matchup_dates", schema=self.schema)
         logger.info(f"{self.schema}.league_matchup_dates has been updated (%d rows)", len(df))
 
     def get_recent_activity(self):
-        df = pl.concat(self._dispatch("get_recent_activity"))
+        if not self.leagues:
+            logger.warning("No leagues connected — skipping get_recent_activity")
+            return
+
+        df = pl.concat(self._dispatch("get_recent_activity"), how="diagonal_relaxed")
         self.db.write(df, "recent_activity", schema=self.schema)
         logger.info(f"{self.schema}.recent_activity has been updated (%d rows)", len(df))
 
@@ -314,10 +318,16 @@ class FtyComponent:
             logger.warning("No leagues connected — skipping get_competitor_roster")
             return
 
+        # Cast the join keys: before a season's matchups start (pre-season) the
+        # date window matches nothing, and an empty read types every column as
+        # Null — which then can't join against the roster's String/Int64 keys.
         df_mup = self.db.read(
             "SELECT * "
             f"FROM {self.schema}.league_matchup_dates "
             f"WHERE '{self.ctx.date_est}' BETWEEN matchup_start AND matchup_end",
+        ).with_columns(
+            pl.col("platform").cast(pl.String),
+            pl.col("league_id").cast(pl.Int64),
         )
 
         self.db.execute(
@@ -326,7 +336,7 @@ class FtyComponent:
         )
 
         df = (
-            pl.concat(self._dispatch("get_competitor_roster"))
+            pl.concat(self._dispatch("get_competitor_roster"), how="diagonal_relaxed")
             .with_columns(pl.lit(self.ctx.date_est).alias("assigned_date"))
             .join(df_mup, on=["platform", "league_id"], how="left")
         )

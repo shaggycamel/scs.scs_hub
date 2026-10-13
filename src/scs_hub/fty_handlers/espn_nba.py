@@ -15,6 +15,19 @@ RESULT_MAP = {
     "TIE":  {"home": "T", "away": "T"},
 }
 
+# Fixed shape so a league with no activity (a new league, or one in the off-season)
+# still yields a frame of the object's own columns, rather than the 0-column frame
+# pl.DataFrame([]) gives — which the anti-join and the concat can't use.
+_RECENT_ACTIVITY_SCHEMA = {
+    "season": pl.String,
+    "platform": pl.String,
+    "league_id": pl.Int64,
+    "timestamp": pl.Datetime("us", "UTC"),
+    "competitor_id": pl.Int64,
+    "action": pl.String,
+    "player": pl.String,
+}
+
 
 class EspnNbaHandler(FtyHandler):
     NAME = "ESPN"
@@ -205,10 +218,20 @@ class EspnNbaHandler(FtyHandler):
                     }
                 )
 
+        df = pl.DataFrame(dfs, schema=_RECENT_ACTIVITY_SCHEMA)
+
+        # Nothing to add, or nothing stored to de-duplicate against yet — either
+        # way the anti-join would be against a key set the left frame lacks (or an
+        # all-Null right side), so skip it and return the frame as-is.
+        if df.is_empty():
+            return df
+
         df_already_done = self.db.read(
             f"SELECT * FROM {self.schema}.recent_activity WHERE season = '{con.season}' AND platform = 'ESPN' AND league_id = {con.league_id}",
         )
-        return pl.DataFrame(dfs).join(df_already_done, on=df_already_done.columns, how="anti")
+        if df_already_done.is_empty():
+            return df
+        return df.join(df_already_done, on=df_already_done.columns, how="anti")
 
     # Categories that get stored, keyed by ESPN's own label. Ratio categories
     # are excluded: FG%/FT% are derived from their components downstream, so a
