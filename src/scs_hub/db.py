@@ -25,9 +25,11 @@ TRANSPORT_SCHEMAS = ("nba", "statyx", "fty", "util", "anl")
 TRANSPORT_STRATEGY = {
     ("nba", "player_box_score"): "game_id",
     ("nba", "team_box_score"): "game_id",
+    ("nba", "play_by_play"): "game_id",
     ("nba", "injuries"): "game_date",
     ("nba", "teams"): "full",
     ("fty", "category_label"): "full",
+    ("fty", "platform_category"): "full",
     ("fty", "free_agents"): "full",
     ("util", "nba_fty_name_match"): "full",
     ("util", "table_column_order"): "full",

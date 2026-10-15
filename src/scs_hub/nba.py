@@ -785,4 +785,199 @@ class NBAComponent:
             else:
                 logger.info("nba.team_roster: nothing to update")
 
+    def get_play_by_play(self):
+        """
+        Play-by-play events for games not yet in nba.play_by_play.
+        
+        Follows get_player_box_score() pattern:
+        - Query view for max(game_date)
+        - Fetch all games after that date
+        - Append new data
+        """
+        pbp_max_dt = (
+            self.db.read(
+                "SELECT MAX(game_date) FROM nba.play_by_play_vw WHERE action_number IS NOT NULL"
+            )
+            .item()
+        )
+        
+        if pbp_max_dt is None:
+            where_clause = "1=1"
+        else:
+            where_clause = f"game_date > '{pbp_max_dt.strftime('%Y-%m-%d')}'"
+        
+        game_ids = self.db.read(
+            f"""
+            SELECT DISTINCT game_id
+            FROM nba.league_game_schedule
+            WHERE {where_clause}
+              AND game_date <= '{self.ctx.date_est}'
+              AND team_winner IS NOT NULL
+            """
+        )
+        
+        if game_ids.is_empty():
+            logger.info("nba.play_by_play: no new games to fetch")
+            return
+        
+        logger.info("nba.play_by_play: fetching %d games", len(game_ids))
+        
+        dfs = []
+        failed = []
+        
+        for idx, game_id in enumerate(game_ids["game_id"].to_list()):
+            game_id_str = f"00{game_id}"
+            
+            logger.debug("processing game_id %s (%d/%d)", game_id_str, idx + 1, len(game_ids))
+            
+            try:
+                pbp = nba_ep.playbyplayv3.PlayByPlayV3(game_id=game_id_str)
+                
+                df = (
+                    pl.from_pandas(pbp.play_by_play.get_data_frame())
+                    .clean_names(case_type="snake")
+                    .with_columns(pl.col("game_id").cast(pl.Int64))
+                )
+                
+                dfs.append(df)
+                
+            except Exception:
+                logger.exception("game_id %s failed", game_id_str)
+                failed.append(game_id_str)
+            
+            time.sleep(1)
+            
+            if (idx + 1) % 10 == 0:
+                logger.info("play_by_play: %d/%d games processed", idx + 1, len(game_ids))
+        
+        if failed:
+            logger.warning("play_by_play: %d game(s) failed: %s", len(failed), failed)
+        
+        if not dfs:
+            logger.error("play_by_play: nothing fetched, skipping write")
+            return
+        
+        df = pl.concat(dfs)
+        self.db.write_ordered(df, "play_by_play", schema="nba")
+        logger.info("nba.play_by_play has been updated (%d rows)", len(df))
+
+    def backfill_play_by_play(self, seasons=None):
+        """
+        Backfill play-by-play for historical seasons.
+        
+        Args:
+            seasons: List of season strings like ["2023-24", "2024-25"].
+                     If None, backfills from 2000-01 to current season.
+        
+        Writes data by game_date (not by season) for better crash recovery:
+        if interrupted, only the current date's games are lost, and the rest
+        of the season is already persisted.
+        
+        Idempotent: deletes existing data for each date before writing,
+        so safe to re-run if interrupted.
+        """
+        if seasons is None:
+            start_year = 2000
+            end_year = self.ctx.cur_season_year
+            seasons = [f"{year}-{str(year + 1)[2:]}" for year in range(start_year, end_year + 1)]
+        
+        logger.info("play_by_play backfill: processing %d seasons", len(seasons))
+        
+        total_rows = 0
+        failed_dates = []
+        
+        for season in seasons:
+            logger.info("play_by_play backfill: processing season %s", season)
+            
+            # Get all game_dates for this season
+            game_dates = self.db.read(
+                f"""
+                SELECT DISTINCT game_date
+                FROM nba.league_game_schedule
+                WHERE season = '{season}'
+                  AND team_winner IS NOT NULL
+                ORDER BY game_date
+                """
+            )
+            
+            if game_dates.is_empty():
+                logger.warning("play_by_play backfill: no games found for %s", season)
+                continue
+            
+            logger.info("play_by_play backfill: %d game dates in %s", len(game_dates), season)
+            
+            # Process each date
+            for date_idx, game_date in enumerate(game_dates["game_date"].to_list()):
+                # Get games for this specific date
+                game_ids = self.db.read(
+                    f"""
+                    SELECT DISTINCT game_id
+                    FROM nba.league_game_schedule
+                    WHERE season = '{season}'
+                      AND game_date = '{game_date}'
+                      AND team_winner IS NOT NULL
+                    ORDER BY game_id
+                    """
+                )
+                
+                dfs = []
+                failed_games = []
+                
+                for idx, game_id in enumerate(game_ids["game_id"].to_list()):
+                    game_id_str = f"00{game_id}"
+                    
+                    logger.debug("backfill %s %s: game_id %s (%d/%d)", 
+                                season, game_date, game_id_str, idx + 1, len(game_ids))
+                    
+                    try:
+                        pbp = nba_ep.playbyplayv3.PlayByPlayV3(game_id=game_id_str)
+                        
+                        df = (
+                            pl.from_pandas(pbp.play_by_play.get_data_frame())
+                            .clean_names(case_type="snake")
+                            .with_columns(pl.col("game_id").cast(pl.Int64))
+                        )
+                        
+                        dfs.append(df)
+                        
+                    except Exception:
+                        logger.exception("backfill %s %s: game_id %s failed", 
+                                       season, game_date, game_id_str)
+                        failed_games.append(game_id_str)
+                    
+                    time.sleep(1)
+                
+                if failed_games:
+                    logger.warning("backfill %s %s: %d game(s) failed", 
+                                 season, game_date, len(failed_games))
+                    failed_dates.append(f"{season} {game_date}")
+                
+                if not dfs:
+                    logger.warning("backfill %s %s: nothing fetched, skipping", 
+                                 season, game_date)
+                    continue
+                
+                # Delete existing data for these game_ids (idempotent)
+                game_id_list = ", ".join(str(g) for g in game_ids["game_id"].to_list())
+                self.db.execute(
+                    f"DELETE FROM nba.play_by_play WHERE game_id IN ({game_id_list})"
+                )
+                
+                # Write this date's data immediately
+                df = pl.concat(dfs)
+                self.db.write_ordered(df, "play_by_play", schema="nba")
+                
+                total_rows += len(df)
+                
+                if (date_idx + 1) % 10 == 0:
+                    logger.info("backfill %s: %d/%d dates processed, %d total rows", 
+                              season, date_idx + 1, len(game_dates), total_rows)
+        
+        logger.info("play_by_play backfill complete: %d total rows across %d seasons", 
+                    total_rows, len(seasons))
+        
+        if failed_dates:
+            logger.warning("backfill had failures on %d date(s): %s", 
+                         len(failed_dates), failed_dates[:10])
+
 
