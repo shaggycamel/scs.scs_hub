@@ -941,8 +941,10 @@ class NBAComponent:
                         if len(df) > 0:
                             dfs.append(df)
                         else:
-                            logger.warning("backfill %s %s: game_id %s returned empty dataframe",
-                                         season, game_date, game_id_str)
+                            # API returns empty for very old games - log once per date
+                            if idx == 0:
+                                logger.debug("backfill %s %s: API returns empty data (game too old?)",
+                                           season, game_date)
                         
                     except Exception:
                         logger.exception("backfill %s %s: game_id %s failed", 
