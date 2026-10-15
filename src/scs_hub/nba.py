@@ -877,7 +877,7 @@ class NBAComponent:
         so safe to re-run if interrupted.
         """
         if seasons is None:
-            start_year = 2000
+            start_year = 2009
             end_year = self.ctx.cur_season_year
             seasons = [f"{year}-{str(year + 1)[2:]}" for year in range(start_year, end_year + 1)]
         
