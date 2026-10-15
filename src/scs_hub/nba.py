@@ -938,7 +938,11 @@ class NBAComponent:
                             .with_columns(pl.col("game_id").cast(pl.Int64))
                         )
                         
-                        dfs.append(df)
+                        if len(df) > 0:
+                            dfs.append(df)
+                        else:
+                            logger.warning("backfill %s %s: game_id %s returned empty dataframe",
+                                         season, game_date, game_id_str)
                         
                     except Exception:
                         logger.exception("backfill %s %s: game_id %s failed", 
@@ -957,6 +961,10 @@ class NBAComponent:
                                  season, game_date)
                     continue
                 
+                # Debug: check what we have before concat
+                logger.info("backfill %s %s: %d dataframes to concat, sizes: %s",
+                           season, game_date, len(dfs), [len(d) for d in dfs])
+                
                 # Delete existing data for these game_ids (idempotent)
                 game_id_list = ", ".join(str(g) for g in game_ids["game_id"].to_list())
                 self.db.execute(
@@ -965,6 +973,8 @@ class NBAComponent:
                 
                 # Write this date's data immediately
                 df = pl.concat(dfs)
+                logger.info("backfill %s %s: writing %d rows from %d game(s)",
+                           season, game_date, len(df), len(dfs))
                 self.db.write_ordered(df, "play_by_play", schema="nba")
                 
                 total_rows += len(df)
