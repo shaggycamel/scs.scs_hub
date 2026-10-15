@@ -909,7 +909,7 @@ class NBAComponent:
             # Process each date
             for date_idx, game_date in enumerate(game_dates["game_date"].to_list()):
                 # Get games for this specific date
-                game_ids = self.db.read(
+                all_game_ids = self.db.read(
                     f"""
                     SELECT DISTINCT game_id
                     FROM nba.league_game_schedule
@@ -919,6 +919,28 @@ class NBAComponent:
                     ORDER BY game_id
                     """
                 )
+                
+                # Check which games are already in the table
+                existing_games = self.db.read(
+                    f"""
+                    SELECT DISTINCT game_id 
+                    FROM nba.play_by_play 
+                    WHERE game_id IN ({", ".join(str(g) for g in all_game_ids["game_id"].to_list())})
+                    """
+                )
+                
+                # Only fetch games not already in the table
+                if existing_games.is_empty():
+                    game_ids = all_game_ids
+                else:
+                    game_ids = all_game_ids.join(
+                        existing_games, on="game_id", how="anti"
+                    )
+                
+                if game_ids.is_empty():
+                    logger.debug("backfill %s %s: all games already in table, skipping",
+                               season, game_date)
+                    continue
                 
                 dfs = []
                 failed_games = []
@@ -959,23 +981,13 @@ class NBAComponent:
                     failed_dates.append(f"{season} {game_date}")
                 
                 if not dfs:
-                    logger.warning("backfill %s %s: nothing fetched, skipping", 
-                                 season, game_date)
+                    logger.info("backfill %s %s: no new games to fetch (all already in table or too old)",
+                              season, game_date)
                     continue
                 
-                # Debug: check what we have before concat
-                logger.info("backfill %s %s: %d dataframes to concat, sizes: %s",
-                           season, game_date, len(dfs), [len(d) for d in dfs])
-                
-                # Delete existing data for these game_ids (idempotent)
-                game_id_list = ", ".join(str(g) for g in game_ids["game_id"].to_list())
-                self.db.execute(
-                    f"DELETE FROM nba.play_by_play WHERE game_id IN ({game_id_list})"
-                )
-                
-                # Write this date's data immediately
+                # Write this date's new data (append only, no delete needed)
                 df = pl.concat(dfs)
-                logger.info("backfill %s %s: writing %d rows from %d game(s)",
+                logger.info("backfill %s %s: %d rows from %d new game(s)",
                            season, game_date, len(df), len(dfs))
                 self.db.write_ordered(df, "play_by_play", schema="nba")
                 
