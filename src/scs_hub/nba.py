@@ -228,8 +228,21 @@ class NBAComponent:
             )
             return
 
+        report = nbainjuries.injury.get_reportdata(valid_time, return_df=True)
+        name_col = next(
+            (
+                c for c in report.columns
+                if str(c).strip().lower().replace(" ", "_") == "player_name"
+            ),
+            None,
+        )
+        if name_col is not None:
+            # A report with no usable names infers the column as float, and the
+            # list split below then fails; nullable string turns empties into NA.
+            report[name_col] = report[name_col].astype("string")
+
         df = (
-            pl.from_pandas(nbainjuries.injury.get_reportdata(valid_time, return_df=True))
+            pl.from_pandas(report)
             .clean_names(case_type="snake")
             .filter(
                 (pl.col("reason") != "NOT YET SUBMITTED") & (pl.col("player_name").is_not_null())
