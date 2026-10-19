@@ -192,6 +192,7 @@ class NBAComponent:
 
         game_ids = self.db.read(
             f"SELECT game_date, game_id, matchup FROM nba.league_game_schedule WHERE game_date BETWEEN '{dt_est}' AND '{dt_est + dt.timedelta(days=2)}' AND matchup LIKE '%@%'",
+            schema_overrides={"game_date": pl.Date, "game_id": pl.Int64, "matchup": pl.String},
         )
 
         player_ids = self.db.read(
@@ -267,8 +268,11 @@ class NBAComponent:
             game_date = row["game_date"]
             game_id = row["game_id"]
             player_name = row["player_name"].replace("'", "''")
+            # No scheduled game in the window (e.g. a pre-season report with no
+            # upcoming games stored yet): the left join leaves game_id null.
+            game_predicate = "game_id IS NULL" if game_id is None else f"game_id = {game_id}"
             self.db.execute(
-                f"DELETE FROM nba.injuries WHERE game_date = '{game_date}' AND game_id = {game_id} AND player_name = '{player_name}'",
+                f"DELETE FROM nba.injuries WHERE game_date = '{game_date}' AND {game_predicate} AND player_name = '{player_name}'",
 
             )
 
