@@ -127,10 +127,13 @@ class UtilComponent:
         self.db = db
         self.ctx = ctx
 
-    def conform_player_ids(self) -> None:
+    def conform_player_ids(self) -> int:
         """
         Give every source id in util.unmatched_player_source_vw a util.player to
         belong to. Covers every season in the backlog, deliberately.
+
+        Returns the number of new players minted. Callers that only need the
+        side effect can ignore it.
 
         Safe to run unconditionally and as often as you like: it is a no-op when
         the backlog is empty. Run it after the jobs that write the source tables,
@@ -173,10 +176,10 @@ class UtilComponent:
         )
         if backlog.is_empty():
             logger.info(
-                "util.player_source_id: 0 source id(s) resolved, %d still unmatched",
+                "util.player_source_id: 0 source id(s) resolved, 0 new player(s) minted, %d still unmatched",
                 before,
             )
-            return
+            return 0
 
         backlog = backlog.with_columns(
             pl.col("source_name").map_elements(norm_name, return_dtype=pl.Utf8).alias("norm")
@@ -202,8 +205,10 @@ class UtilComponent:
             .group_by("norm")
             .agg(pl.col("source_name").min().alias("conformed_name"))
         )
+        minted = 0
         for r in to_mint.iter_rows(named=True):
             self._mint_player(r["conformed_name"])
+            minted += 1
         if not to_mint.is_empty():
             players = read_players()
 
@@ -235,9 +240,10 @@ class UtilComponent:
 
         resolved = matches.height
         logger.info(
-            "util.player_source_id: %d source id(s) resolved, %d still unmatched",
-            resolved, before - resolved,
+            "util.player_source_id: %d source id(s) resolved, %d new player(s) minted, %d still unmatched",
+            resolved, minted, before - resolved,
         )
+        return minted
 
     def check_player_identity(self) -> pl.DataFrame:
         """
@@ -412,13 +418,20 @@ class UtilComponent:
         different-name links are NEVER automatic: a human must set
         status='accepted', because the model cannot be trusted to keep genuine
         namesakes (Jameer Nelson Sr/Jr) apart. Applied rows are marked 'applied'.
+
+        Returns the number of proposals applied.
         """
+        return self._apply_player_identity_reviews(auto, min_confidence)["applied"]
+
+    def _apply_player_identity_reviews(self, auto: bool = True, min_confidence: float = 0.9) -> dict:
+        """Apply reviews and return both the applied and minted counts."""
         rows = self.db.read(
             "SELECT * FROM util.player_identity_review "
             "WHERE status IN ('pending', 'accepted') ORDER BY review_id"
         )
 
         applied = 0
+        minted = 0
         for r in rows.iter_rows(named=True):
             proposal = r["proposal"]
 
@@ -442,6 +455,7 @@ class UtilComponent:
                     if self._norm_is_owned(r["proposed_name"]):
                         continue  # a player with that name exists; not 'new'
                     target = self._mint_player(r["proposed_name"])
+                    minted += 1
                     same_name = True
 
                 # A same-name link may auto-apply on confidence. A rename — a
@@ -471,8 +485,11 @@ class UtilComponent:
                 self._mark_review(r["review_id"], "applied")
                 applied += 1
 
-        logger.info("apply_player_identity_reviews: %d proposal(s) applied", applied)
-        return applied
+        logger.info(
+            "apply_player_identity_reviews: %d proposal(s) applied, %d player(s) minted",
+            applied, minted,
+        )
+        return {"applied": applied, "minted": minted}
 
     def sync_player_identity(self, review: bool = True, apply: bool = True) -> dict:
         """
@@ -484,8 +501,12 @@ class UtilComponent:
         Never destructive on its own: the review only stages, and apply will not
         merge or rename without a human's status='accepted'. Returns a summary;
         an empty backlog means the model was not called at all.
+
+        'minted' is the number of new util.player rows created by this call. It
+        is gross: a player minted for a 'new' proposal is counted even if that
+        proposal is later found untrusted, and merges are not subtracted.
         """
-        self.conform_player_ids()
+        conform_minted = self.conform_player_ids()
 
         backlog = self.db.read(
             "SELECT count(*) AS n FROM util.unmatched_player_source_vw"
@@ -495,13 +516,16 @@ class UtilComponent:
         if review and backlog:
             staged = self.review_player_identities(origin="backlog")
 
-        applied = self.apply_player_identity_reviews() if apply else 0
+        apply_stats = (
+            self._apply_player_identity_reviews() if apply else {"applied": 0, "minted": 0}
+        )
         checks = self.check_player_identity()
 
         summary = {
             "backlog": backlog,
+            "minted": conform_minted + apply_stats["minted"],
             "staged": staged,
-            "applied": applied,
+            "applied": apply_stats["applied"],
             "checks": {r["check_name"]: r["failures"] for r in checks.iter_rows(named=True)},
         }
         logger.info("sync_player_identity: %s", summary)
