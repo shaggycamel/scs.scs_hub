@@ -5,6 +5,31 @@ gives the symptom, the code path, the cause, and the fix. `scs.nba.database`
 (`__main__.py`) records one `util.update_log` row per object, so a failure is the
 object's row with `success = false` plus the run exiting non-zero.
 
+## 2026-10-23 — `nba.league_game_schedule`: failed CDN fetch wiped the 2026-27 regular season
+
+Observed on `cockroach-write` after the season started.
+
+- **Symptom**
+
+  `nba.league_game_schedule` held only the preseason rows for 2026-27; every
+  `nba.injuries.game_id` was NULL, and `nba.player_box_score_vw` had no
+  2026-27 regular-season rows.
+
+- **Where** — `NBAComponent.get_game_schedule`, `_upcoming_games`;
+  `get_player_box_score`/`get_team_box_score`.
+
+- **Cause** — the full refresh deleted the season before writing. When the
+  static CDN returned HTTP 403, `_upcoming_games` returned `None`, the caller
+  substituted an empty frame, and only the preseason `LeagueGameLog` rows were
+  written. Injuries then had no schedule rows to map against, and the box-score
+  selectors only looked after the view's max date, so same-day gaps were never
+  retried.
+
+- **Fix** — source the full season from `ScheduleLeagueV2` and write it only
+  when the frame is non-empty; select scheduled games missing from the box-score
+  base tables instead of using the max view date; rerun injuries against the
+  restored schedule. `nba.schedule_vw` is back on `nba.league_game_schedule`.
+
 ## 2026-10-13 — `fty.get_recent_activity`: `ColumnNotFoundError` for a league with no activity
 
 Found in local testing against `postgres`, for a new league with no activity yet.

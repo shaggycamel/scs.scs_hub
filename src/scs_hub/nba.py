@@ -284,16 +284,18 @@ class NBAComponent:
         self.db.write_ordered(df, "injuries", schema="nba")
 
     def get_player_box_score(self):
-        bs_max_dt = (
-            self.db.read(
-                "select max(game_date) from nba.player_box_score_vw where min is not null",
-
-            )
-            .item()
-            .strftime("%Y-%m-%d")
-        )
         game_ids = self.db.read(
-            f"SELECT DISTINCT game_id FROM nba.league_game_schedule WHERE game_date > '{bs_max_dt}' AND game_date <= '{self.ctx.date_est}'",
+            f"""
+            SELECT DISTINCT g.game_id
+            FROM nba.league_game_schedule g
+            WHERE g.season = '{self.ctx.cur_season}'
+              AND g.game_date <= '{self.ctx.date_est}'
+              AND g.team_winner IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM nba.player_box_score p WHERE p.game_id = g.game_id
+              )
+            ORDER BY g.game_id
+            """
         )
         cols_trad = self.db.read(
             "select * from util.table_column_order where schema = 'nba' and table_name = 'player_box_score_traditional' order by column_order",
@@ -380,16 +382,18 @@ class NBAComponent:
         logger.info("nba.player_box_score have been updated (%d rows)", len(df))
 
     def get_team_box_score(self):
-        bs_max_dt = (
-            self.db.read(
-                "select max(game_date) from nba.team_box_score_vw where min is not null",
-
-            )
-            .item()
-            .strftime("%Y-%m-%d")
-        )
         game_ids = self.db.read(
-            f"SELECT DISTINCT game_id FROM nba.league_game_schedule WHERE game_date > '{bs_max_dt}' AND game_date <= '{self.ctx.date_est}'",
+            f"""
+            SELECT DISTINCT g.game_id
+            FROM nba.league_game_schedule g
+            WHERE g.season = '{self.ctx.cur_season}'
+              AND g.game_date <= '{self.ctx.date_est}'
+              AND g.team_winner IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM nba.team_box_score t WHERE t.game_id = g.game_id
+              )
+            ORDER BY g.game_id
+            """
         )
         cols_trad = self.db.read(
             "select * from util.table_column_order where schema = 'nba' and table_name = 'team_box_score_traditional' order by column_order",
@@ -482,10 +486,10 @@ class NBAComponent:
             dfs.append(bst.join(bsa, on=["game_id", "team_id"], how="left"))
 
         if failed:
-            logger.warning("player_box_score: %d game(s) failed: %s", len(failed), failed)
+            logger.warning("team_box_score: %d game(s) failed: %s", len(failed), failed)
 
         if not dfs:
-            logger.error("player_box_score: nothing fetched, skipping write")
+            logger.error("team_box_score: nothing fetched, skipping write")
             return
 
         df = pl.concat(dfs)
