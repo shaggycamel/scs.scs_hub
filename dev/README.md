@@ -458,7 +458,7 @@ not what a try/except catches. Measured against the live API with id 42824
 | method | what a non-NBA id actually does | guard |
 |---|---|---|
 | `get_player_season_stats` | returns a **0-row** frame, no exception; pandas types every column of it as object, so `PLAYER_ID` arrives String against a real player's Int64 and `pl.concat` raises `SchemaError`, losing the whole run | skip empty frames, log them at INFO as "not NBA players"; plus try/except → `continue` for genuine API errors, and skip the write when nothing was fetched |
-| `get_player_info` | returns a **1-row** frame 33 wide — `CommonPlayerInfo` omits `SUPPLEMENTAL_STATUS` for some ids, so a plain concat raises `ShapeError`; then `height` is `""`, which splits to `[""]` and a strict Float64 cast raises | `concat(how="diagonal_relaxed")` as `get_game_schedule` already does, and `strict=False` / `null_on_oob=True` on the height casts, matching how `weight` was already handled |
+| `get_player_info` | returns a **1-row** frame 33 wide — `CommonPlayerInfo` omits `SUPPLEMENTAL_STATUS` for some ids, so a plain concat raises `ShapeError`; then `height` is `""`, which splits to `[""]` and a strict Float64 cast raises | `concat(how="diagonal_relaxed")` as `get_team_roster` does, and `strict=False` / `null_on_oob=True` on the height casts, matching how `weight` was already handled |
 
 `get_player_season_stats` keeps a strict concat — its frames are a consistent 27
 wide, and the empty-frame guard is what that loop needs.

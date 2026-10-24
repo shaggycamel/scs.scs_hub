@@ -133,9 +133,9 @@ class Database:
         """
         Conform a frame to its registration, then write to <schema>.<table>.
 
-        order_key overrides which registration to read when one table is fed by
-        more than one method (nba.league_game_schedule has a /past and a /future
-        column set), and otherwise defaults to the table's own name.
+        order_key overrides which registration to read when the caller needs a
+        column order registered under another name, and otherwise defaults to
+        the table's own name.
         """
         df = self.conform(df, order_key or table, schema)
         self.write(df, table, schema=schema)

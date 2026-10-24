@@ -2,8 +2,6 @@ import time
 import zoneinfo
 import datetime as dt
 import logging
-import requests
-import dateutil.parser
 import polars as pl
 import polars.selectors as cs
 import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
@@ -12,23 +10,8 @@ import nba_api.stats.endpoints as nba_ep
 
 logger = logging.getLogger(__name__)
 
-_SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
-
-# Columns _upcoming_games produces end to end. Returned with zero rows when the
-# CDN is unusable.
-_UPCOMING_GAMES_SCHEMA = {
-    "season_type": pl.String,
-    "game_id": pl.Int64,
-    "game_date": pl.Date,
-    "matchup": pl.String,
-    "season": pl.String,
-    "team_winner": pl.String,
-    "team_loser": pl.String,
-    "team": pl.String,
-    "opponent": pl.String,
-    "home": pl.Boolean,
-}
-
+# Only the season types this component stores. All-Star (003), the play-in
+# tournament (005) and the NBA Cup final (006) are intentionally out of scope.
 _SCHEDULE_SEASON_TYPES = {
     "001": "Pre Season",
     "002": "Regular Season",
@@ -496,169 +479,6 @@ class NBAComponent:
         self.db.write(df, "team_box_score", schema="nba")
         logger.info("nba.team_box_score have been updated (%d rows)", len(df))
 
-    def _played_games(self, season: str) -> pl.DataFrame:
-        """Completed games for a season, from LeagueGameLog — one call per season type."""
-        year = int(season[:4])
-        dfs = []
-        for type_season in ["Regular Season", "Pre Season", "Playoffs", "All Star"]:
-            hist_game_schedule = nba_ep.leaguegamelog.LeagueGameLog(
-                season_type_all_star=type_season, season=year
-            )
-            dfs.append(
-                (
-                    pl.from_pandas(hist_game_schedule.get_data_frames()[0]).with_columns(
-                        pl.lit(type_season).alias("season_type")
-                    )
-                )
-            )
-            time.sleep(1)
-
-        frames = [d for d in dfs if len(d) > 0]
-        if not frames:
-            # Pre-season: nothing played yet, so the schedule is upcoming games only.
-            logger.info("nba.league_game_schedule: no games played yet for %s", season)
-            return pl.DataFrame(schema={"game_id": pl.Int64})
-
-        df = (
-            pl.concat(frames)
-            .clean_names(case_type="snake")
-            .with_columns(
-                [
-                    pl.col("game_id").cast(pl.Int64),
-                    pl.col("game_date").str.to_date(),
-                    pl.lit(season).alias("season"),
-                    pl.col("matchup").str.replace_all(r" @ | vs\.? ", "-").alias("opponent"),
-                ]
-            )
-            .with_columns(pl.col("opponent").str.split("-"))
-            .with_columns(
-                pl.when(pl.col("team_abbreviation") == pl.col("opponent").list.get(0))
-                .then(pl.col("opponent").list.get(1))
-                .otherwise(pl.col("opponent").list.get(0))
-                .alias("opponent")
-            )
-            .with_columns(
-                [
-                    (
-                        pl.when(pl.col("wl") == "W")
-                        .then(pl.col("team_abbreviation"))
-                        .otherwise(pl.col("opponent"))
-                        .alias("team_winner")
-                    ),
-                    (
-                        pl.when(pl.col("wl") == "L")
-                        .then(pl.col("team_abbreviation"))
-                        .otherwise(pl.col("opponent"))
-                        .alias("team_loser")
-                    ),
-                    (
-                        pl.when(pl.col("matchup").str.contains("vs."))
-                        .then(pl.lit(True))
-                        .otherwise(pl.lit(False))
-                        .alias("home")
-                    ),
-                ]
-            )
-            .rename({"team_abbreviation": "team"})
-        )
-
-        return df
-
-    def _upcoming_games(self, season: str, played_ids: pl.DataFrame) -> pl.DataFrame | None:
-        """Not-yet-played games for a season, from the NBA's static schedule JSON.
-
-        Returns None when the CDN is unusable, so the caller can tell "fetch
-        failed" apart from "no upcoming games" and avoid wiping stored rows.
-        """
-        request = None
-        try:
-            request = requests.get(_SCHEDULE_URL, timeout=30)
-            request.raise_for_status()
-            payload = request.json()
-        except (requests.exceptions.RequestException, ValueError):
-            logger.warning(
-                "nba.league_game_schedule: schedule CDN unusable "
-                "(status=%s, body starts %r) — keeping stored upcoming games",
-                getattr(request, "status_code", None),
-                getattr(request, "content", b"")[:200],
-            )
-            return None
-
-        key_dates = self.db.read(f"SELECT * FROM nba.key_dates WHERE season = '{season}'")
-
-        dfs = []
-        for game_date in payload["leagueSchedule"]["gameDates"]:
-            for game in game_date["games"]:
-                dfs.append(
-                    {
-                        "game_id": int(game["gameId"]),
-                        "game_date": dateutil.parser.parse(game_date["gameDate"]).date(),
-                        "matchup": game["homeTeam"]["teamTricode"]
-                        + " vs. "
-                        + game["awayTeam"]["teamTricode"],
-                    }
-                )
-
-        df = (
-            pl.concat(
-                [
-                    pl.DataFrame(dfs),
-                    (
-                        pl.DataFrame(dfs)
-                        .with_columns(pl.col("matchup").str.split_exact(" ", n=2))
-                        .unnest(pl.col("matchup"))
-                        .with_columns(
-                            (pl.col("field_2") + " @ " + pl.col("field_0"))
-                            .str.strip_chars()
-                            .alias("matchup")
-                        )
-                        .drop(cs.starts_with("field"))
-                    ),
-                ]
-            )
-            .with_columns(pl.col("matchup").str.split_exact(" ", n=2).alias("temp"))
-            .unnest(pl.col("temp"))
-            .with_columns(
-                [
-                    pl.lit(season).alias("season"),
-                    pl.lit(None).cast(pl.String).alias("team_winner"),
-                    pl.lit(None).cast(pl.String).alias("team_loser"),
-                    pl.col("field_0").alias("team"),
-                    pl.col("field_2").alias("opponent"),
-                    pl.when(pl.col("field_1") == "vs.")
-                    .then(pl.lit(True))
-                    .otherwise(pl.lit(False))
-                    .alias("home"),
-                ]
-            )
-            .with_columns(
-                [
-                    pl.when(pl.col("matchup").str.strip_chars().is_in(["@", "vs."]))
-                    .then(pl.lit("undetermined") if col == "matchup" else pl.lit(None))
-                    .otherwise(pl.col(col))
-                    .alias(col)
-                    for col in ["team", "opponent", "matchup"]
-                ]
-            )
-            .join_where(
-                key_dates,
-                pl.col("game_date") >= pl.col("begin_date"),
-                pl.col("game_date") <= pl.col("end_date"),
-            )
-            .join(
-                played_ids.select("game_id").with_columns(pl.col("game_id").cast(pl.Int64)),
-                on="game_id",
-                how="anti",
-            )
-            .filter(
-                pl.col("team").is_in(self.ctx.nba_teams.get_column("abbreviation").to_list())
-                | pl.col("opponent").is_in(self.ctx.nba_teams.get_column("abbreviation").to_list())
-                | (pl.col("matchup") == "undetermined")
-            )
-        )
-
-        return df
-
     def _scheduleleaguev2_games(self, season: str) -> pl.DataFrame | None:
         try:
             raw = nba_ep.scheduleleaguev2.ScheduleLeagueV2(
@@ -778,26 +598,39 @@ class NBAComponent:
             logger.exception("nba.league_game_schedule: ScheduleLeagueV2 failed")
             return None
 
-    def get_game_schedule(self, season: str | None = None, upcoming_only: bool = False):
+    def get_game_schedule(self, season: str | None = None):
         """
         Replace one season's league schedule from ScheduleLeagueV2.
 
+        Defaults to the current season. Passing another season is a best-effort
+        backfill: only Pre Season/Regular Season/Playoffs are stored, and the
+        team filter uses current abbreviations, so relocated franchises can be
+        dropped.
+
         The endpoint returns the full season — played and upcoming games — in one
-        call. A failed or empty fetch leaves the stored season untouched.
-        upcoming_only is accepted for compatibility but ignored.
+        call. A failed or empty fetch raises before any delete, so the stored
+        season is left untouched.
         """
         season = season or self.ctx.cur_season
-
-        logger.info("nba.league_game_schedule")
-        if upcoming_only:
-            logger.info(
-                "nba.league_game_schedule: upcoming_only ignored; replacing the full season"
+        if season != self.ctx.cur_season:
+            logger.warning(
+                "nba.league_game_schedule: backfilling %s uses current team "
+                "abbreviations; relocated franchises and non-stored season "
+                "types may be omitted",
+                season,
             )
 
+        logger.info("nba.league_game_schedule")
         df = self._scheduleleaguev2_games(season)
         if df is None or df.is_empty():
-            logger.warning("nba.league_game_schedule: no games returned — nothing written")
-            return
+            logger.error(
+                "nba.league_game_schedule: no games returned for %s — "
+                "leaving stored rows untouched",
+                season,
+            )
+            raise RuntimeError(
+                f"nba.league_game_schedule: no games returned for {season}"
+            )
 
         self.db.delete_where("league_game_schedule", "nba", f"season = '{season}'")
         self.db.write_ordered(df, "league_game_schedule", schema="nba")
@@ -916,32 +749,23 @@ class NBAComponent:
 
     def get_play_by_play(self):
         """
-        Play-by-play events for games not yet in nba.play_by_play.
-        
-        Follows get_player_box_score() pattern:
-        - Query view for max(game_date)
-        - Fetch all games after that date
-        - Append new data
+        Play-by-play events for completed current-season games missing from
+        nba.play_by_play.
+
+        Selects scheduled games that have no rows in the table, so a game that
+        failed to write at all is retried on the next pass.
         """
-        pbp_max_dt = (
-            self.db.read(
-                "SELECT MAX(game_date) FROM nba.play_by_play_vw WHERE action_number IS NOT NULL"
-            )
-            .item()
-        )
-        
-        if pbp_max_dt is None:
-            where_clause = "1=1"
-        else:
-            where_clause = f"game_date > '{pbp_max_dt.strftime('%Y-%m-%d')}'"
-        
         game_ids = self.db.read(
             f"""
-            SELECT DISTINCT game_id
-            FROM nba.league_game_schedule
-            WHERE {where_clause}
-              AND game_date <= '{self.ctx.date_est}'
-              AND team_winner IS NOT NULL
+            SELECT DISTINCT g.game_id
+            FROM nba.league_game_schedule g
+            WHERE g.season = '{self.ctx.cur_season}'
+              AND g.game_date <= '{self.ctx.date_est}'
+              AND g.team_winner IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM nba.play_by_play p WHERE p.game_id = g.game_id
+              )
+            ORDER BY g.game_id
             """
         )
         
@@ -968,7 +792,10 @@ class NBAComponent:
                     .with_columns(pl.col("game_id").cast(pl.Int64))
                 )
                 
-                dfs.append(df)
+                if df.is_empty():
+                    logger.debug("game_id %s returned no play-by-play events", game_id_str)
+                else:
+                    dfs.append(df)
                 
             except Exception:
                 logger.exception("game_id %s failed", game_id_str)
@@ -996,14 +823,14 @@ class NBAComponent:
         
         Args:
             seasons: List of season strings like ["2023-24", "2024-25"].
-                     If None, backfills from 2000-01 to current season.
-        
+                     If None, backfills from 2009-10 to current season.
+
         Writes data by game_date (not by season) for better crash recovery:
         if interrupted, only the current date's games are lost, and the rest
         of the season is already persisted.
-        
-        Idempotent: deletes existing data for each date before writing,
-        so safe to re-run if interrupted.
+
+        Idempotent: skips games already in nba.play_by_play and appends each
+        date's new rows, so it is safe to re-run if interrupted.
         """
         if seasons is None:
             start_year = 2009
