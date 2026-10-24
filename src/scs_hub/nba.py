@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 _SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
 
 # Columns _upcoming_games produces end to end. Returned with zero rows when the
-# CDN is unusable, so the concat and conform in get_game_schedule still see a
-# frame of the right shape.
+# CDN is unusable.
 _UPCOMING_GAMES_SCHEMA = {
     "season_type": pl.String,
     "game_id": pl.Int64,
@@ -28,6 +27,12 @@ _UPCOMING_GAMES_SCHEMA = {
     "team": pl.String,
     "opponent": pl.String,
     "home": pl.Boolean,
+}
+
+_SCHEDULE_SEASON_TYPES = {
+    "001": "Pre Season",
+    "002": "Regular Season",
+    "004": "Playoffs",
 }
 
 
@@ -650,44 +655,147 @@ class NBAComponent:
 
         return df
 
+    def _scheduleleaguev2_games(self, season: str) -> pl.DataFrame | None:
+        try:
+            raw = nba_ep.scheduleleaguev2.ScheduleLeagueV2(
+                league_id="00", season=season
+            ).get_data_frames()[0]
+            if raw is None or len(raw) == 0:
+                logger.warning(
+                    "nba.league_game_schedule: ScheduleLeagueV2 returned no rows"
+                )
+                return None
+
+            df = (
+                pl.from_pandas(raw)
+                .with_columns(
+                    pl.col("gameId").str.slice(0, 3).alias("prefix"),
+                    pl.col("gameStatus").cast(pl.Int64).alias("game_status"),
+                    pl.col("homeTeam_teamTricode")
+                    .cast(pl.String)
+                    .str.strip_chars()
+                    .alias("home_team"),
+                    pl.col("awayTeam_teamTricode")
+                    .cast(pl.String)
+                    .str.strip_chars()
+                    .alias("away_team"),
+                    pl.col("homeTeam_score").cast(pl.Int64).alias("home_score"),
+                    pl.col("awayTeam_score").cast(pl.Int64).alias("away_score"),
+                )
+                .filter(pl.col("prefix").is_in(list(_SCHEDULE_SEASON_TYPES)))
+                .with_columns(
+                    pl.col("prefix")
+                    .replace_strict(_SCHEDULE_SEASON_TYPES)
+                    .alias("season_type")
+                )
+                .filter(
+                    pl.col("home_team").is_not_null()
+                    & (pl.col("home_team") != "")
+                    & pl.col("away_team").is_not_null()
+                    & (pl.col("away_team") != "")
+                )
+            )
+
+            nba_teams = self.ctx.nba_teams.get_column("abbreviation").to_list()
+            df = df.filter(
+                pl.col("home_team").is_in(nba_teams)
+                & pl.col("away_team").is_in(nba_teams)
+            )
+
+            final = (
+                (pl.col("game_status") == 3)
+                & pl.col("home_score").is_not_null()
+                & pl.col("away_score").is_not_null()
+            )
+            home_win = final & (pl.col("home_score") > pl.col("away_score"))
+            away_win = final & (pl.col("away_score") > pl.col("home_score"))
+
+            df = df.with_columns(
+                pl.when(home_win)
+                .then(pl.col("home_team"))
+                .when(away_win)
+                .then(pl.col("away_team"))
+                .otherwise(None)
+                .cast(pl.String)
+                .alias("team_winner"),
+                pl.when(home_win)
+                .then(pl.col("away_team"))
+                .when(away_win)
+                .then(pl.col("home_team"))
+                .otherwise(None)
+                .cast(pl.String)
+                .alias("team_loser"),
+            )
+
+            home = df.select(
+                pl.col("gameId").cast(pl.Int64).alias("gameId"),
+                pl.col("gameDate")
+                .str.slice(0, 10)
+                .str.to_date("%m/%d/%Y")
+                .alias("gameDate"),
+                pl.col("seasonYear"),
+                pl.col("season_type"),
+                pl.concat_str(
+                    [pl.col("home_team"), pl.lit(" vs. "), pl.col("away_team")]
+                ).alias("matchup"),
+                pl.col("home_team").alias("team"),
+                pl.col("away_team").alias("opponent"),
+                pl.lit(True).alias("home"),
+                pl.col("team_winner"),
+                pl.col("team_loser"),
+            )
+            away = df.select(
+                pl.col("gameId").cast(pl.Int64).alias("gameId"),
+                pl.col("gameDate")
+                .str.slice(0, 10)
+                .str.to_date("%m/%d/%Y")
+                .alias("gameDate"),
+                pl.col("seasonYear"),
+                pl.col("season_type"),
+                pl.concat_str(
+                    [pl.col("away_team"), pl.lit(" @ "), pl.col("home_team")]
+                ).alias("matchup"),
+                pl.col("away_team").alias("team"),
+                pl.col("home_team").alias("opponent"),
+                pl.lit(False).alias("home"),
+                pl.col("team_winner"),
+                pl.col("team_loser"),
+            )
+
+            df = pl.concat([home, away]).sort(["gameId", "team"])
+            dupes = df.height - df.unique(subset=["gameId", "team"]).height
+            if dupes:
+                logger.error(
+                    "nba.league_game_schedule: %d duplicate game/team rows", dupes
+                )
+                return None
+            return df
+        except Exception:
+            logger.exception("nba.league_game_schedule: ScheduleLeagueV2 failed")
+            return None
+
     def get_game_schedule(self, season: str | None = None, upcoming_only: bool = False):
         """
-        League schedule for one season — played and upcoming games in one write.
+        Replace one season's league schedule from ScheduleLeagueV2.
 
-        Played games come from LeagueGameLog (four calls, one per season type) and
-        carry a winner; upcoming games come from the NBA's static schedule JSON and
-        have a null one. Writing them together means the table is never left half
-        populated, and the delete is scoped to the season actually asked for.
-
-        upcoming_only skips the four played calls and replaces just the undecided
-        rows — the cheap daily refresh once a season is under way.
+        The endpoint returns the full season — played and upcoming games — in one
+        call. A failed or empty fetch leaves the stored season untouched.
+        upcoming_only is accepted for compatibility but ignored.
         """
         season = season or self.ctx.cur_season
 
         logger.info("nba.league_game_schedule")
-
         if upcoming_only:
-            played = self.db.read(
-                f"SELECT game_id FROM nba.league_game_schedule "
-                f"WHERE season = '{season}' AND team_winner IS NOT NULL"
+            logger.info(
+                "nba.league_game_schedule: upcoming_only ignored; replacing the full season"
             )
-            df = self._upcoming_games(season, played)
-            if df is None:
-                # The CDN refused the request; keep the undecided rows we already
-                # have rather than replacing them with nothing.
-                logger.warning("nba.league_game_schedule: upcoming refresh skipped")
-                return
-            self.db.delete_where(
-                "league_game_schedule", "nba", f"season = '{season}' AND team_winner IS NULL"
-            )
-        else:
-            played = self._played_games(season)
-            upcoming = self._upcoming_games(season, played)
-            if upcoming is None:
-                upcoming = pl.DataFrame(schema=_UPCOMING_GAMES_SCHEMA)
-            df = pl.concat([played, upcoming], how="diagonal_relaxed")
-            self.db.delete_where("league_game_schedule", "nba", f"season = '{season}'")
 
+        df = self._scheduleleaguev2_games(season)
+        if df is None or df.is_empty():
+            logger.warning("nba.league_game_schedule: no games returned — nothing written")
+            return
+
+        self.db.delete_where("league_game_schedule", "nba", f"season = '{season}'")
         self.db.write_ordered(df, "league_game_schedule", schema="nba")
 
     def get_team_roster(self, pre_season=False):
