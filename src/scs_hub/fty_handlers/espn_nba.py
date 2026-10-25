@@ -15,6 +15,11 @@ RESULT_MAP = {
     "TIE":  {"home": "T", "away": "T"},
 }
 
+# ESPN's lineupSlotCounts is keyed by slot id. Slots 0-11 are the starting
+# lineup (PG, SG, SF, PF, C, G, F, SG/SF, G/F, PF/C, F/C, UT); 12 is bench,
+# 13 IR and 14 unused. 15 (rookie) is not used by NBA leagues.
+STARTING_SLOT_IDS = frozenset(range(12))
+
 # Fixed shape so a league with no activity (a new league, or one in the off-season)
 # still yields a frame of the object's own columns, rather than the 0-column frame
 # pl.DataFrame([]) gives — which the anti-join and the concat can't use.
@@ -48,6 +53,11 @@ class EspnNbaHandler(FtyHandler):
         # (only scoring/schedule/trade settings get extracted), so it's
         # pulled directly from the raw league JSON instead of con.settings.
         raw = con.espn_request.get_league()
+        roster_settings = raw["settings"]["rosterSettings"]
+        slot_counts = {
+            int(slot_id): int(count)
+            for slot_id, count in roster_settings.get("lineupSlotCounts", {}).items()
+        }
         return pl.DataFrame(
             [
                 {
@@ -58,6 +68,12 @@ class EspnNbaHandler(FtyHandler):
                     "scoring_type": con.settings.scoring_type,
                     "team_count": con.settings.team_count,
                     "is_public": raw["settings"]["isPublic"],
+                    "roster_size": sum(slot_counts.values()),
+                    "starter_count": sum(
+                        count
+                        for slot_id, count in slot_counts.items()
+                        if slot_id in STARTING_SLOT_IDS
+                    ),
                 }
             ]
         )
@@ -107,8 +123,19 @@ class EspnNbaHandler(FtyHandler):
         return pl.DataFrame(dfs)
 
     def get_league_competitor(self, con) -> pl.DataFrame:
+        # ESPN always reports at least one division, even when the league has no
+        # real split: the single entry is a default standings group (often named
+        # "A team", "League Standings" or similar) covering every team. A league
+        # only uses divisions when ESPN reports more than one.
+        has_divisions = len(con.settings.division_map) > 1
         dfs = []
         for competitor in con.teams:
+            division_name = (
+                con.settings.division_map.get(competitor.division_id)
+                if has_divisions
+                else None
+            )
+            division_id = competitor.division_id if has_divisions else None
             dfs.append(
                 {
                     "season": con.season,
@@ -117,6 +144,8 @@ class EspnNbaHandler(FtyHandler):
                     "competitor_id": competitor.team_id,
                     "competitor_abbrev": competitor.team_abbrev,
                     "competitor_name": competitor.team_name,
+                    "division_id": division_id,
+                    "division_name": division_name,
                 }
             )
         return pl.DataFrame(dfs)
