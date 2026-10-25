@@ -13,7 +13,6 @@ dependencies = [
     "nba_api",
     "nbainjuries",
     "espn_api",
-    "yfpy",
     "aiohttp",
     "janitor",
     "pandas",
