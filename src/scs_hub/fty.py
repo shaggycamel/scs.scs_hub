@@ -343,61 +343,102 @@ class FtyComponent:
 
         self.db.write_ordered(df, "competitor_roster", schema=self.schema)
 
+    def _matchup_periods(self, con, matchup_period: int | None) -> list[int]:
+        """
+        Periods a scheduled run should refresh.
+
+        The current period alone is not enough: a run can land after ESPN has
+        advanced, which leaves the just-closed period frozen at its last
+        in-week snapshot. Refreshing the previous period as well makes the close
+        final regardless of when the run happens.
+        """
+        if matchup_period is not None:
+            return [matchup_period]
+
+        current = con.currentMatchupPeriod
+        return [p for p in (current - 1, current) if p is not None and p >= 1]
+
     def get_matchup_box_score(self, matchup_period: int | None = None):
-        # Kept per-league (not batched into one _dispatch call) since leagues
-        # can be on different matchup periods — matches the original
-        # method's own comment about why this stays league-specific.
+        """
+        Box scores for the current and just-closed matchup periods.
+
+        Kept per-league (not batched into one _dispatch call) since leagues can
+        be on different matchup periods. Pass `matchup_period` to refresh a
+        single period instead.
+        """
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_matchup_box_score")
             return
 
         for (sport, platform, league_id), con in self.leagues.items():
-            logger.info(f"%s;%s {self.schema}.matchup_box_score", platform, league_id)
             handler = self.handlers[(sport, platform)]
-            df = handler.get_matchup_box_score(con, matchup_period)
+            for period in self._matchup_periods(con, matchup_period):
+                logger.info(f"%s;%s {self.schema}.matchup_box_score ({period})", platform, league_id)
+                df = handler.get_matchup_box_score(con, period)
 
-            if df.is_empty():
-                logger.info(f"%s;%s {self.schema}.matchup_box_score: nothing returned — skipped", platform, league_id)
-                continue
+                if df.is_empty():
+                    logger.info(
+                        f"%s;%s {self.schema}.matchup_box_score ({period}): nothing returned — skipped",
+                        platform,
+                        league_id,
+                    )
+                    continue
 
-            self.db.execute(
-                f"DELETE FROM {self.schema}.matchup_box_score "
-                f"WHERE season = '{con.season}' "
-                f"AND platform = '{platform}' AND league_id = {league_id} "
-                f"AND matchup = {df['matchup'][0]}",
-            )
-            self.db.write(df, "matchup_box_score", schema=self.schema)
-            logger.info(f"%s;%s {self.schema}.matchup_box_score has been updated (%d rows)", platform, league_id, len(df))
+                self.db.execute(
+                    f"DELETE FROM {self.schema}.matchup_box_score "
+                    f"WHERE season = '{con.season}' "
+                    f"AND platform = '{platform}' AND league_id = {league_id} "
+                    f"AND matchup = {period}",
+                )
+                self.db.write(df, "matchup_box_score", schema=self.schema)
+                logger.info(
+                    f"%s;%s {self.schema}.matchup_box_score ({period}) has been updated (%d rows)",
+                    platform,
+                    league_id,
+                    len(df),
+                )
 
     def get_matchup_result(self, matchup_period: int | None = None):
         """
-        The outcome of the current matchup period, one row per competitor.
+        The outcome of the current and just-closed matchup periods, one row per
+        competitor.
 
         Kept per-league rather than batched for the same reason as
         get_matchup_box_score: leagues can be on different matchup periods, so
         the delete has to be scoped to the period each league actually returned.
+        Pass `matchup_period` to refresh a single period instead.
         """
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_matchup_result")
             return
 
         for (sport, platform, league_id), con in self.leagues.items():
-            logger.info(f"%s;%s {self.schema}.matchup_result", platform, league_id)
             handler = self.handlers[(sport, platform)]
-            df = handler.get_matchup_result(con, matchup_period)
+            for period in self._matchup_periods(con, matchup_period):
+                logger.info(f"%s;%s {self.schema}.matchup_result ({period})", platform, league_id)
+                df = handler.get_matchup_result(con, period)
 
-            if df.is_empty():
-                logger.info(f"%s;%s {self.schema}.matchup_result: nothing returned — skipped", platform, league_id)
-                continue
+                if df.is_empty():
+                    logger.info(
+                        f"%s;%s {self.schema}.matchup_result ({period}): nothing returned — skipped",
+                        platform,
+                        league_id,
+                    )
+                    continue
 
-            self.db.execute(
-                f"DELETE FROM {self.schema}.matchup_result "
-                f"WHERE season = '{con.season}' "
-                f"AND platform = '{platform}' AND league_id = {league_id} "
-                f"AND matchup = {df['matchup'][0]}",
-            )
-            self.db.write(df, "matchup_result", schema=self.schema)
-            logger.info(f"%s;%s {self.schema}.matchup_result has been updated (%d rows)", platform, league_id, len(df))
+                self.db.execute(
+                    f"DELETE FROM {self.schema}.matchup_result "
+                    f"WHERE season = '{con.season}' "
+                    f"AND platform = '{platform}' AND league_id = {league_id} "
+                    f"AND matchup = {period}",
+                )
+                self.db.write(df, "matchup_result", schema=self.schema)
+                logger.info(
+                    f"%s;%s {self.schema}.matchup_result ({period}) has been updated (%d rows)",
+                    platform,
+                    league_id,
+                    len(df),
+                )
 
     def backfill_matchups(self, periods=None) -> None:
         """

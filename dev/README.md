@@ -300,12 +300,11 @@ Yahoo's handler was left alone beyond the schema threading; it is out of scope.
   calling a method against a schema with no such table. Flip it when the schemas
   swap.
 
-  Daily is the right cadence and needs no special handling. `get_matchup_result`
-  defaults to `con.currentMatchupPeriod` and scopes its delete to that period, so
-  each run refreshes the live period in place. `util.update_log` shows the existing
-  job running daily at ~15:06 UTC, and under it periods 1-15 of 2025-26 came out
-  exactly right — refetching closed periods on a schedule is not needed.
-  `backfill_matchups()` stays a manual tool for seeding and repair.
+  Daily is the right cadence. `get_matchup_result` and `get_matchup_box_score`
+  refresh the live period and the just-closed one, scoping each delete to its
+  period, so a run that lands after ESPN has advanced still finalises the
+  previous week. `backfill_matchups()` stays a manual tool for seeding and
+  deeper repair.
 
 - `league`, `league_categories`, `league_competitor` and `league_matchup_dates`
   need no `update_schedule` rows: they are derived once at the start of a season.
