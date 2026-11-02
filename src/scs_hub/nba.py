@@ -5,7 +5,6 @@ import logging
 import polars as pl
 import polars.selectors as cs
 import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
-import nbainjuries
 import nba_api.stats.endpoints as nba_ep
 
 logger = logging.getLogger(__name__)
@@ -172,6 +171,11 @@ class NBAComponent:
         
 
     def get_team_injuries(self, force_date=None):
+        # nbainjuries starts a JVM at import time. Keep it local so importing
+        # scs_hub (and constructing SportsHub) stays JVM-free; only an injury
+        # refresh pays that cost.
+        import nbainjuries
+
         dt_est = self.ctx.date_est if force_date is None else force_date
 
         teams_true = self.db.read(
