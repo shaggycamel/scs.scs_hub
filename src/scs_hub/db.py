@@ -13,11 +13,11 @@ TIMEOUT = 3 * 60  # connection timeout, seconds
 
 # Schemas carrying readable data. Read-only roles are granted SELECT on these,
 # never on Cockroach's own crdb_internal/pg_* schemas.
-READ_SCHEMAS = ("nba", "fty", "statyx", "util")
+READ_SCHEMAS = ("nba", "fty", "statyx", "util", "mod")
 
 # Schemas carried by transport_from, in the order they are moved. The order mirrors
 # util.update_schedule's schema_sequence: nba box scores feed fty's matchup box score.
-TRANSPORT_SCHEMAS = ("nba", "statyx", "fty", "util", "anl")
+TRANSPORT_SCHEMAS = ("nba", "statyx", "fty", "util", "mod")
 
 # Tables whose partition key is not a season column, so it cannot be inferred. Every
 # other table that carries a season column moves by season; a table that carries neither
@@ -35,7 +35,7 @@ TRANSPORT_STRATEGY = {
     ("util", "table_column_order"): "full",
     ("util", "update_log"): "full",
     ("util", "update_schedule"): "full",
-    ("anl", "pts_prediction"): "full",
+    ("mod", "pts_prediction"): "full",
 }
 
 # Identity tables are keyed by player_key, not season, and the target's copy may carry
