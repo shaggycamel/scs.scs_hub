@@ -225,6 +225,7 @@ class EspnNbaHandler(FtyHandler):
                         "player_team": player.proTeam.replace("PHL", "PHI").replace("PHO", "PHX"),
                         "player_injury_status": player.injuryStatus,
                         "player_acquisition_type": player.acquisitionType,
+                        "lineup_slot": player.lineupSlot,
                     }
                 )
         return pl.DataFrame(dfs)
