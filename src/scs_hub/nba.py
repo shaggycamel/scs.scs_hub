@@ -165,6 +165,15 @@ class NBAComponent:
                 ]
             )
             .rename({"person_id": "player_id"})
+            .with_columns(
+                # CommonPlayerInfo returns "1999-07-07T00:00:00"; the column is
+                # typed DATE in the database.
+                pl.col("birthdate")
+                .cast(pl.String)
+                .str.slice(0, 10)
+                .str.to_date()
+                .alias("birthdate")
+            )
         )
 
         self.db.write_ordered(df, "player_info", schema="nba")
@@ -187,11 +196,20 @@ class NBAComponent:
             schema_overrides={"game_date": pl.Date, "game_id": pl.Int64, "matchup": pl.String},
         )
 
-        player_ids = self.db.read(
-            "SELECT source_name AS nba_name, source_id AS nba_id "
-            "FROM util.player_source_id WHERE platform = 'nba'"
-        ).with_columns(
-            pl.col("nba_name").str.normalize("NFKD").str.replace_all("[^\\x00-\\x7F]", "")
+        player_ids = (
+            self.db.read(
+                "SELECT source_name AS nba_name, source_id AS nba_id "
+                "FROM util.player_source_id WHERE platform = 'nba'"
+            )
+            .with_columns(
+                pl.col("nba_name").str.normalize("NFKD").str.replace_all("[^\\x00-\\x7F]", "")
+            )
+            # 37 names map to two ids in the crosswalk. Joining on name would
+            # multiply those report rows and can attach the wrong id; leave
+            # ambiguous names unmatched for the id resolver downstream.
+            .with_columns(pl.col("nba_name").count().over("nba_name").alias("_n"))
+            .filter(pl.col("_n") == 1)
+            .drop("_n")
         )
 
         dt_est = dt.datetime.combine(
@@ -254,6 +272,9 @@ class NBAComponent:
             .join(player_ids, how="left", left_on="player_name", right_on="nba_name")
             .join(game_ids, how="left", on=["game_date", "matchup"])
             .rename({"current_status": "status"})
+            # The PDF parser occasionally emits the same row more than once;
+            # exact duplicates here used to be appended on every reload.
+            .unique()
         )
 
         for row in df.iter_rows(named=True):
