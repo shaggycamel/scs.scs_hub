@@ -7,6 +7,17 @@ import polars.selectors as cs
 import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
 import nba_api.stats.endpoints as nba_ep
 
+from scs_hub.utility import _fold
+
+
+def _fold_report_name(name: str) -> str:
+    """Fold a name for report matching.
+
+    NBA writes "Nikola Đurišić"; the report writes "Nikola Djurisic". The
+    shared fold maps Đ to D, which drops the j, so transliterate đ first.
+    """
+    return _fold(name.replace("Đ", "Dj").replace("đ", "dj"))
+
 logger = logging.getLogger(__name__)
 
 # Only the season types this component stores. All-Star (003), the play-in
@@ -201,13 +212,18 @@ class NBAComponent:
                 "SELECT source_name AS nba_name, source_id AS nba_id "
                 "FROM util.player_source_id WHERE platform = 'nba'"
             )
+            # The report writes ASCII names ("Nikola Djurisic") while the
+            # crosswalk keeps the NBA spelling ("Nikola Đurišić"). Fold both
+            # sides with the same accent-aware function before joining.
             .with_columns(
-                pl.col("nba_name").str.normalize("NFKD").str.replace_all("[^\\x00-\\x7F]", "")
+                pl.col("nba_name")
+                .map_elements(_fold_report_name, return_dtype=pl.Utf8)
+                .alias("_name_fold")
             )
-            # 37 names map to two ids in the crosswalk. Joining on name would
-            # multiply those report rows and can attach the wrong id; leave
-            # ambiguous names unmatched for the id resolver downstream.
-            .with_columns(pl.col("nba_name").count().over("nba_name").alias("_n"))
+            # A folded name can map to two ids. Joining would multiply those
+            # report rows and can attach the wrong id; leave ambiguous names
+            # unmatched for the id resolver downstream.
+            .with_columns(pl.col("_name_fold").count().over("_name_fold").alias("_n"))
             .filter(pl.col("_n") == 1)
             .drop("_n")
         )
@@ -268,10 +284,16 @@ class NBAComponent:
                     ).alias("player_name"),
                 ]
             )
+            .with_columns(
+                pl.col("player_name")
+                .map_elements(_fold_report_name, return_dtype=pl.Utf8)
+                .alias("_name_fold")
+            )
             .join(teams_true, how="left", on="team")
-            .join(player_ids, how="left", left_on="player_name", right_on="nba_name")
+            .join(player_ids, how="left", on="_name_fold")
             .join(game_ids, how="left", on=["game_date", "matchup"])
             .rename({"current_status": "status"})
+            .drop("_name_fold", "nba_name")
             # The PDF parser occasionally emits the same row more than once;
             # exact duplicates here used to be appended on every reload.
             .unique()
