@@ -1,5 +1,6 @@
-import os
 import configparser
+import os
+
 import polars as pl
 
 from scs_hub.config import credentials_path, ensure_credentials_file
@@ -52,9 +53,11 @@ class StatyxPipeline:
         api_key: str | None = None,
         ini_path: str | None = None,
         max_concurrent: int = 5,
-    ):
+    ) -> None:
         if sport not in self.BASE_URLS:
-            raise ValueError(f"Unknown sport '{sport}'. Options: {list(self.BASE_URLS)}")
+            raise ValueError(
+                f"Unknown sport '{sport}'. Options: {list(self.BASE_URLS)}"
+            )
 
         self.sport = sport
         self.api_key = _load_api_key(api_key, ini_path)
@@ -63,7 +66,7 @@ class StatyxPipeline:
         self.max_concurrent = max_concurrent
         self.errors: dict = {}
 
-    def _url(self, endpoint: str, key=None) -> str:
+    def _url(self, endpoint: str, key: object = None) -> str:
         path = self.endpoints[endpoint]["path"]
         return self.base_url + path.format(key=key)
 
@@ -73,13 +76,15 @@ class StatyxPipeline:
             calls = [(key, self._url(endpoint, key), params) for key in keys]
             return await client.get_many(calls, paginated=spec["paginated"])
 
-    async def _fetch_single(self, endpoint: str, params: dict):
+    async def _fetch_single(self, endpoint: str, params: dict) -> list | dict:
         spec = self.endpoints[endpoint]
         async with StatyxClient(self.api_key, self.max_concurrent) as client:
             fetch = client.get_paginated if spec["paginated"] else client.get_one
             return await fetch(self._url(endpoint), params)
 
-    def run(self, endpoint: str, params: dict | None = None, keys: list | None = None) -> pl.DataFrame:
+    def run(
+        self, endpoint: str, params: dict | None = None, keys: list | None = None
+    ) -> pl.DataFrame:
         """
         Sync entry point.
 
@@ -94,7 +99,9 @@ class StatyxPipeline:
         On return, self.errors holds any per-key failures ({key: error_message}).
         """
         if endpoint not in self.endpoints:
-            raise ValueError(f"Unknown endpoint '{endpoint}'. Options: {list(self.endpoints)}")
+            raise ValueError(
+                f"Unknown endpoint '{endpoint}'. Options: {list(self.endpoints)}"
+            )
 
         spec = self.endpoints[endpoint]
         params = params or {}

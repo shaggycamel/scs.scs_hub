@@ -12,15 +12,36 @@ import polars as pl
 import requests
 from sqlalchemy import text
 
+from scs_hub.context import Context
+from scs_hub.db import Database
+
 logger = logging.getLogger(__name__)
 
 # Letters NFKD does not decompose, folded to a single ASCII base. Needed so the
 # audit detector groups "ø/æ/đ" spellings the same way on every platform.
-_LATIN_FOLD = str.maketrans({
-    "æ": "a", "Æ": "A", "ø": "o", "Ø": "O", "ß": "s", "đ": "d", "Đ": "D",
-    "ł": "l", "Ł": "L", "þ": "t", "Þ": "T", "ð": "d", "Ð": "D", "œ": "o",
-    "Œ": "O", "ħ": "h", "ı": "i", "ŋ": "n", "Ŋ": "N",
-})
+_LATIN_FOLD = str.maketrans(
+    {
+        "æ": "a",
+        "Æ": "A",
+        "ø": "o",
+        "Ø": "O",
+        "ß": "s",
+        "đ": "d",
+        "Đ": "D",
+        "ł": "l",
+        "Ł": "L",
+        "þ": "t",
+        "Þ": "T",
+        "ð": "d",
+        "Ð": "D",
+        "œ": "o",
+        "Œ": "O",
+        "ħ": "h",
+        "ı": "i",
+        "ŋ": "n",
+        "Ŋ": "N",
+    }
+)
 
 # JSON schema handed to Ollama's `format` so the model returns parseable rows.
 _PROPOSAL_SCHEMA = {
@@ -123,7 +144,7 @@ class UtilComponent:
     than owning them.
     """
 
-    def __init__(self, db, ctx):
+    def __init__(self, db: Database, ctx: Context) -> None:
         self.db = db
         self.ctx = ctx
 
@@ -182,15 +203,21 @@ class UtilComponent:
             return 0
 
         backlog = backlog.with_columns(
-            pl.col("source_name").map_elements(norm_name, return_dtype=pl.Utf8).alias("norm")
+            pl.col("source_name")
+            .map_elements(norm_name, return_dtype=pl.Utf8)
+            .alias("norm")
         ).filter(pl.col("norm") != "")
 
         def read_players() -> pl.DataFrame:
-            return self.db.read(
-                "SELECT player_key, conformed_name FROM util.player"
-            ).with_columns(
-                pl.col("conformed_name").map_elements(norm_name, return_dtype=pl.Utf8).alias("norm")
-            ).filter(pl.col("norm") != "")
+            return (
+                self.db.read("SELECT player_key, conformed_name FROM util.player")
+                .with_columns(
+                    pl.col("conformed_name")
+                    .map_elements(norm_name, return_dtype=pl.Utf8)
+                    .alias("norm")
+                )
+                .filter(pl.col("norm") != "")
+            )
 
         players = read_players()
 
@@ -241,7 +268,9 @@ class UtilComponent:
         resolved = matches.height
         logger.info(
             "util.player_source_id: %d source id(s) resolved, %d new player(s) minted, %d still unmatched",
-            resolved, minted, before - resolved,
+            resolved,
+            minted,
+            before - resolved,
         )
         return minted
 
@@ -263,11 +292,13 @@ class UtilComponent:
             "SELECT count(*) AS n FROM util.player p WHERE NOT EXISTS "
             "(SELECT 1 FROM util.player_source_id m WHERE m.player_key = p.player_key)"
         ).item()
-        backlog = db.read("SELECT count(*) AS n FROM util.unmatched_player_source_vw").item()
+        backlog = db.read(
+            "SELECT count(*) AS n FROM util.unmatched_player_source_vw"
+        ).item()
 
-        norms = db.read("SELECT conformed_name FROM util.player")["conformed_name"].map_elements(
-            norm_name, return_dtype=pl.Utf8
-        )
+        norms = db.read("SELECT conformed_name FROM util.player")[
+            "conformed_name"
+        ].map_elements(norm_name, return_dtype=pl.Utf8)
         collisions = (
             norms.filter(norms != "").value_counts().filter(pl.col("count") > 1).height
         )
@@ -280,7 +311,9 @@ class UtilComponent:
             schema={"check_name": pl.Utf8, "failures": pl.Int64},
         )
 
-    def review_player_identities(self, origin: str = "backlog", batch_size: int = 20, limit: int | None = None) -> int:
+    def review_player_identities(
+        self, origin: str = "backlog", batch_size: int = 20, limit: int | None = None
+    ) -> int:
         """
         Ask the local model to reconcile names the deterministic matcher cannot,
         and write its proposals to util.player_identity_review. Never touches
@@ -348,7 +381,8 @@ class UtilComponent:
                 ):
                     logger.info(
                         "review: dropped implausible link %r -> %s",
-                        cand["source_name"], target,
+                        cand["source_name"],
+                        target,
                     )
                     continue
                 if proposal == "merge" and not _compatible_names(
@@ -360,7 +394,10 @@ class UtilComponent:
                 # actions: a merge with subject == target would delete the
                 # player, and a 'new' for a name that already exists would mint
                 # a duplicate and steal the id.
-                if proposal in ("link", "merge") and target == cand["subject_player_key"]:
+                if (
+                    proposal in ("link", "merge")
+                    and target == cand["subject_player_key"]
+                ):
                     continue
                 if proposal == "new":
                     proposed_name = p.get("proposed_name")
@@ -405,11 +442,15 @@ class UtilComponent:
 
         logger.info(
             "review_player_identities(%s): %d candidate(s), %d new proposal(s) staged",
-            origin, candidates.height, staged,
+            origin,
+            candidates.height,
+            staged,
         )
         return staged
 
-    def apply_player_identity_reviews(self, auto: bool = True, min_confidence: float = 0.9) -> int:
+    def apply_player_identity_reviews(
+        self, auto: bool = True, min_confidence: float = 0.9
+    ) -> int:
         """
         Promote staged proposals into util.player / util.player_source_id.
 
@@ -423,7 +464,9 @@ class UtilComponent:
         """
         return self._apply_player_identity_reviews(auto, min_confidence)["applied"]
 
-    def _apply_player_identity_reviews(self, auto: bool = True, min_confidence: float = 0.9) -> dict:
+    def _apply_player_identity_reviews(
+        self, auto: bool = True, min_confidence: float = 0.9
+    ) -> dict:
         """Apply reviews and return both the applied and minted counts."""
         rows = self.db.read(
             "SELECT * FROM util.player_identity_review "
@@ -487,7 +530,8 @@ class UtilComponent:
 
         logger.info(
             "apply_player_identity_reviews: %d proposal(s) applied, %d player(s) minted",
-            applied, minted,
+            applied,
+            minted,
         )
         return {"applied": applied, "minted": minted}
 
@@ -517,7 +561,9 @@ class UtilComponent:
             staged = self.review_player_identities(origin="backlog")
 
         apply_stats = (
-            self._apply_player_identity_reviews() if apply else {"applied": 0, "minted": 0}
+            self._apply_player_identity_reviews()
+            if apply
+            else {"applied": 0, "minted": 0}
         )
         checks = self.check_player_identity()
 
@@ -526,7 +572,9 @@ class UtilComponent:
             "minted": conform_minted + apply_stats["minted"],
             "staged": staged,
             "applied": apply_stats["applied"],
-            "checks": {r["check_name"]: r["failures"] for r in checks.iter_rows(named=True)},
+            "checks": {
+                r["check_name"]: r["failures"] for r in checks.iter_rows(named=True)
+            },
         }
         logger.info("sync_player_identity: %s", summary)
         return summary
@@ -583,7 +631,9 @@ class UtilComponent:
             },
         )
 
-    def _shortlist_players(self, players: pl.DataFrame, candidates: pl.DataFrame, limit: int = 25) -> pl.DataFrame:
+    def _shortlist_players(
+        self, players: pl.DataFrame, candidates: pl.DataFrame, limit: int = 25
+    ) -> pl.DataFrame:
         """
         The players worth showing the model for this batch, ranked by how many
         folded name tokens they share with a candidate and capped tight. Sending
@@ -610,12 +660,14 @@ class UtilComponent:
         top = sorted(score, key=lambda key: (-score[key], key))[:limit]
         return players.filter(pl.col("player_key").is_in(top))
 
-    def _ask_ollama(self, players: pl.DataFrame, chunk: pl.DataFrame, origin: str):
+    def _ask_ollama(
+        self, players: pl.DataFrame, chunk: pl.DataFrame, origin: str
+    ) -> tuple[list[dict], str]:
         """Send one batch of candidates and the shortlisted players, get JSON back."""
         host, model, timeout, think = self._ollama_config()
 
         known = "\n".join(
-            f'{r["player_key"]}: {r["conformed_name"]}'
+            f"{r['player_key']}: {r['conformed_name']}"
             for r in players.iter_rows(named=True)
         )
         candidates = chunk.select(
@@ -646,8 +698,7 @@ class UtilComponent:
             )
         user = (
             f"Known players (player_key: name):\n{known}\n\n"
-            "Candidates:\n" + json.dumps(candidates) + "\n\n" +
-            options + "\n\n"
+            "Candidates:\n" + json.dumps(candidates) + "\n\n" + options + "\n\n"
             "For every candidate return platform, source_id, proposal, a confidence "
             "in [0,1], target_player_key (null when unused), proposed_name (null when "
             "unused), and a reason under 12 words. A 'link' or 'merge' must carry a "
@@ -694,10 +745,18 @@ class UtilComponent:
             (host or "http://localhost:11434").rstrip("/"),
             model or "llama3.1",
             int(timeout or 600),
-            str(think).strip().lower() not in ("false", "0", "no") if think is not None else False,
+            str(think).strip().lower() not in ("false", "0", "no")
+            if think is not None
+            else False,
         )
 
-    def _link_source_id(self, platform, source_id, source_name, player_key) -> None:
+    def _link_source_id(
+        self,
+        platform: str,
+        source_id: str,
+        source_name: str,
+        player_key: int | None,
+    ) -> None:
         with self.db.engine.begin() as conn:
             conn.execute(
                 text(
@@ -725,7 +784,9 @@ class UtilComponent:
             return False
         return any(
             norm_name(r["conformed_name"]) == norm
-            for r in self.db.read("SELECT conformed_name FROM util.player").iter_rows(named=True)
+            for r in self.db.read("SELECT conformed_name FROM util.player").iter_rows(
+                named=True
+            )
         )
 
     def _mint_player(self, name: str, needs_review: bool = True) -> int:
@@ -738,14 +799,18 @@ class UtilComponent:
                 {"n": name, "nr": needs_review},
             ).scalar()
 
-    def _merge_players(self, subject_key: int, target_key: int, name: str | None = None) -> None:
+    def _merge_players(
+        self, subject_key: int, target_key: int, name: str | None = None
+    ) -> None:
         # A self-merge would DELETE the player and orphan its mappings.
         if subject_key == target_key:
             return
         with self.db.engine.begin() as conn:
             conn.execute(
-                text("UPDATE util.player_source_id SET player_key = :t "
-                     "WHERE player_key = :s"),
+                text(
+                    "UPDATE util.player_source_id SET player_key = :t "
+                    "WHERE player_key = :s"
+                ),
                 {"t": target_key, "s": subject_key},
             )
             conn.execute(
@@ -753,16 +818,20 @@ class UtilComponent:
                 {"s": subject_key},
             )
             conn.execute(
-                text("UPDATE util.player SET needs_review = false, "
-                     "conformed_name = COALESCE(:n, conformed_name) "
-                     "WHERE player_key = :t"),
+                text(
+                    "UPDATE util.player SET needs_review = false, "
+                    "conformed_name = COALESCE(:n, conformed_name) "
+                    "WHERE player_key = :t"
+                ),
                 {"t": target_key, "n": name},
             )
 
     def _mark_review(self, review_id: int, status: str) -> None:
         with self.db.engine.begin() as conn:
             conn.execute(
-                text("UPDATE util.player_identity_review SET status = :st "
-                     "WHERE review_id = :r"),
+                text(
+                    "UPDATE util.player_identity_review SET status = :st "
+                    "WHERE review_id = :r"
+                ),
                 {"st": status, "r": review_id},
             )

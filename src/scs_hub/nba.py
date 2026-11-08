@@ -1,12 +1,15 @@
-import time
-import zoneinfo
 import datetime as dt
 import logging
-import polars as pl
-import polars.selectors as cs
+import time
+import zoneinfo
+
 import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
 import nba_api.stats.endpoints as nba_ep
+import polars as pl
+import polars.selectors as cs
 
+from scs_hub.context import Context
+from scs_hub.db import Database
 from scs_hub.utility import _fold
 
 
@@ -17,6 +20,7 @@ def _fold_report_name(name: str) -> str:
     shared fold maps Đ to D, which drops the j, so transliterate đ first.
     """
     return _fold(name.replace("Đ", "Dj").replace("đ", "dj"))
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +36,11 @@ _SCHEDULE_SEASON_TYPES = {
 class NBAComponent:
     """Official NBA stats — writes into the nba.* schema."""
 
-    def __init__(self, db, ctx):
+    def __init__(self, db: Database, ctx: Context) -> None:
         self.db = db
         self.ctx = ctx
 
-    def get_player_season_stats(self):
+    def get_player_season_stats(self) -> None:
         """Season stats (totals)"""
         ls_pl = self.ctx.active_ids("nba")
 
@@ -52,7 +56,9 @@ class NBAComponent:
             # pre-season-only non-NBA participants reach this loop each season.
             # Breaking on the first would mean one such id costs the whole fetch.
             try:
-                player_season = nba_ep.playercareerstats.PlayerCareerStats(player_id=str(player))
+                player_season = nba_ep.playercareerstats.PlayerCareerStats(
+                    player_id=str(player)
+                )
                 frame = pl.from_pandas(player_season.data_sets[0].get_data_frame())
             except Exception:
                 logger.exception("player_id %s failed", player)
@@ -77,7 +83,8 @@ class NBAComponent:
         if empty:
             logger.info(
                 "player_season_stats: %d id(s) returned no rows (not NBA players): %s",
-                len(empty), empty,
+                len(empty),
+                empty,
             )
 
         if failed:
@@ -98,7 +105,7 @@ class NBAComponent:
 
         self.db.write_ordered(df, "player_season_stats", schema="nba")
 
-    def get_player_info(self):
+    def get_player_info(self) -> None:
         ls_pl = self.ctx.active_ids("nba")
 
         logger.info("nba.player_info")
@@ -108,7 +115,9 @@ class NBAComponent:
         for ix, player in enumerate(ls_pl):
             # Same two outcomes as get_player_season_stats; see its comments.
             try:
-                player_info = nba_ep.commonplayerinfo.CommonPlayerInfo(player_id=str(player))
+                player_info = nba_ep.commonplayerinfo.CommonPlayerInfo(
+                    player_id=str(player)
+                )
                 frame = pl.from_pandas(player_info.data_sets[0].get_data_frame())
             except Exception:
                 logger.exception("player_id %s failed", player)
@@ -128,7 +137,8 @@ class NBAComponent:
         if empty:
             logger.info(
                 "player_info: %d id(s) returned no rows (not NBA players): %s",
-                len(empty), empty,
+                len(empty),
+                empty,
             )
 
         if failed:
@@ -164,9 +174,12 @@ class NBAComponent:
                     # through, and for any genuine player with the field blank.
                     (
                         (
-                            pl.col("height").list.get(0, null_on_oob=True)
-                            .cast(pl.Float64, strict=False) * 12
-                            + pl.col("height").list.get(1, null_on_oob=True)
+                            pl.col("height")
+                            .list.get(0, null_on_oob=True)
+                            .cast(pl.Float64, strict=False)
+                            * 12
+                            + pl.col("height")
+                            .list.get(1, null_on_oob=True)
                             .cast(pl.Float64, strict=False)
                         )
                         * 2.54
@@ -188,9 +201,8 @@ class NBAComponent:
         )
 
         self.db.write_ordered(df, "player_info", schema="nba")
-        
 
-    def get_team_injuries(self, force_date=None):
+    def get_team_injuries(self, force_date: dt.date | None = None) -> None:
         # nbainjuries starts a JVM at import time. Keep it local so importing
         # scs_hub (and constructing SportsHub) stays JVM-free; only an injury
         # refresh pays that cost.
@@ -204,7 +216,11 @@ class NBAComponent:
 
         game_ids = self.db.read(
             f"SELECT game_date, game_id, matchup FROM nba.league_game_schedule WHERE game_date BETWEEN '{dt_est}' AND '{dt_est + dt.timedelta(days=2)}' AND matchup LIKE '%@%'",
-            schema_overrides={"game_date": pl.Date, "game_id": pl.Int64, "matchup": pl.String},
+            schema_overrides={
+                "game_date": pl.Date,
+                "game_id": pl.Int64,
+                "matchup": pl.String,
+            },
         )
 
         player_ids = (
@@ -235,13 +251,16 @@ class NBAComponent:
         times = [tm.replace(tzinfo=None) for tm in times]
         times.reverse()
 
-        def get_valid_time():
+        def get_valid_time() -> dt.datetime | None:
             for tm in times:
                 try:
-                    nbainjuries._parser.validate_injrepurl(nbainjuries.injury.gen_url(tm))
+                    nbainjuries._parser.validate_injrepurl(
+                        nbainjuries.injury.gen_url(tm)
+                    )
+                except nbainjuries._parser.URLRetrievalError:
+                    logger.debug("no injury report at %s", tm, exc_info=True)
+                else:
                     return tm
-                except Exception:
-                    continue
             return None
 
         # No valid report URL means either the slate is dark or nbainjuries' URL
@@ -258,7 +277,8 @@ class NBAComponent:
         report = nbainjuries.injury.get_reportdata(valid_time, return_df=True)
         name_col = next(
             (
-                c for c in report.columns
+                c
+                for c in report.columns
                 if str(c).strip().lower().replace(" ", "_") == "player_name"
             ),
             None,
@@ -272,7 +292,8 @@ class NBAComponent:
             pl.from_pandas(report)
             .clean_names(case_type="snake")
             .filter(
-                (pl.col("reason") != "NOT YET SUBMITTED") & (pl.col("player_name").is_not_null())
+                (pl.col("reason") != "NOT YET SUBMITTED")
+                & (pl.col("player_name").is_not_null())
             )
             .with_columns(pl.col("player_name").str.split(", "))
             .with_columns(
@@ -280,7 +301,9 @@ class NBAComponent:
                     pl.col("game_date").str.to_date(format="%m/%d/%Y"),
                     pl.col("matchup").str.replace_all("@", " @ "),
                     (
-                        pl.col("player_name").list.get(1) + " " + pl.col("player_name").list.get(0)
+                        pl.col("player_name").list.get(1)
+                        + " "
+                        + pl.col("player_name").list.get(0)
                     ).alias("player_name"),
                 ]
             )
@@ -305,15 +328,16 @@ class NBAComponent:
             player_name = row["player_name"].replace("'", "''")
             # No scheduled game in the window (e.g. a pre-season report with no
             # upcoming games stored yet): the left join leaves game_id null.
-            game_predicate = "game_id IS NULL" if game_id is None else f"game_id = {game_id}"
+            game_predicate = (
+                "game_id IS NULL" if game_id is None else f"game_id = {game_id}"
+            )
             self.db.execute(
                 f"DELETE FROM nba.injuries WHERE game_date = '{game_date}' AND {game_predicate} AND player_name = '{player_name}'",
-
             )
 
         self.db.write_ordered(df, "injuries", schema="nba")
 
-    def get_player_box_score(self):
+    def get_player_box_score(self) -> None:
         game_ids = self.db.read(
             f"""
             SELECT DISTINCT g.game_id
@@ -361,10 +385,14 @@ class NBAComponent:
                     .with_columns(cs.string().replace("", None))
                     .with_columns(pl.col("game_id").cast(pl.Int64))
                     .with_columns(
-                        pl.col("min").str.replace(r":.*", "").cast(pl.Int64, strict=False)
+                        pl.col("min")
+                        .str.replace(r":.*", "")
+                        .cast(pl.Int64, strict=False)
                     )
                     .with_columns(
-                        (pl.col("firstName") + " " + pl.col("familyName")).alias("player_name")
+                        (pl.col("firstName") + " " + pl.col("familyName")).alias(
+                            "player_name"
+                        )
                     )
                     .select(cols_trad["column_name"].to_list())
                 )
@@ -401,7 +429,9 @@ class NBAComponent:
             dfs.append(bst.join(bsa, on=["game_id", "player_id"], how="left"))
 
         if failed:
-            logger.warning("player_box_score: %d game(s) failed: %s", len(failed), failed)
+            logger.warning(
+                "player_box_score: %d game(s) failed: %s", len(failed), failed
+            )
 
         if not dfs:
             logger.error("player_box_score: nothing fetched, skipping write")
@@ -411,7 +441,7 @@ class NBAComponent:
         self.db.write(df, "player_box_score", schema="nba")
         logger.info("nba.player_box_score have been updated (%d rows)", len(df))
 
-    def get_team_box_score(self):
+    def get_team_box_score(self) -> None:
         game_ids = self.db.read(
             f"""
             SELECT DISTINCT g.game_id
@@ -459,7 +489,9 @@ class NBAComponent:
                     .with_columns(cs.string().replace("", None))
                     .with_columns(pl.col("game_id").cast(pl.Int64))
                     .with_columns(
-                        pl.col("min").str.replace(r":.*", "").cast(pl.Int64, strict=False)
+                        pl.col("min")
+                        .str.replace(r":.*", "")
+                        .cast(pl.Int64, strict=False)
                     )
                     .group_by(["game_id", "team_id", "team_abbreviation"])
                     .agg(cs.numeric().sum())
@@ -645,7 +677,7 @@ class NBAComponent:
             logger.exception("nba.league_game_schedule: ScheduleLeagueV2 failed")
             return None
 
-    def get_game_schedule(self, season: str | None = None):
+    def get_game_schedule(self, season: str | None = None) -> None:
         """
         Replace one season's league schedule from ScheduleLeagueV2.
 
@@ -682,7 +714,7 @@ class NBAComponent:
         self.db.delete_where("league_game_schedule", "nba", f"season = '{season}'")
         self.db.write_ordered(df, "league_game_schedule", schema="nba")
 
-    def get_team_roster(self, pre_season=False):
+    def get_team_roster(self, pre_season: bool = False) -> None:
         teams = self.ctx.nba_teams["id"].to_list()
 
         logger.info("nba.team_roster")
@@ -724,7 +756,9 @@ class NBAComponent:
                     pl.col("num").str.replace("", None),
                     pl.lit(self.ctx.cur_season).alias("season"),
                     pl.lit(None).cast(pl.Float64).alias("salary"),
-                    pl.lit(None if pre_season else self.ctx.date_est).cast(pl.Date).alias("entry_date"),
+                    pl.lit(None if pre_season else self.ctx.date_est)
+                    .cast(pl.Date)
+                    .alias("entry_date"),
                     pl.lit(None).cast(pl.Date).alias("exit_date"),
                 ]
             )
@@ -743,7 +777,6 @@ class NBAComponent:
         else:
             df_existing = self.db.read(
                 f"SELECT * FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND exit_date IS NULL",
-
                 schema_overrides={
                     "team_id": pl.Int64,
                     "player_id": pl.Int64,
@@ -771,13 +804,17 @@ class NBAComponent:
                 .join(
                     (
                         df.join(
-                            df_existing, on=["season", "team_id", "player_id"], how="anti"
+                            df_existing,
+                            on=["season", "team_id", "player_id"],
+                            how="anti",
                         ).select("player_id")
                     ),
                     on="player_id",
                     how="inner",
                 )
-                .with_columns(pl.col("salary").backward_fill().forward_fill().over("player_id"))
+                .with_columns(
+                    pl.col("salary").backward_fill().forward_fill().over("player_id")
+                )
             )
 
             if len(df_traded) > 0:
@@ -786,15 +823,17 @@ class NBAComponent:
 
                 self.db.execute(
                     f"DELETE FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND player_id IN ({del_ids}) AND exit_date IS NULL",
-    
                 )
 
                 self.db.write(df_traded, "team_roster", schema="nba")
-                logger.info("nba.team_roster traded players have been updated (%d rows)", len(df_traded))
+                logger.info(
+                    "nba.team_roster traded players have been updated (%d rows)",
+                    len(df_traded),
+                )
             else:
                 logger.info("nba.team_roster: nothing to update")
 
-    def get_play_by_play(self):
+    def get_play_by_play(self) -> None:
         """
         Play-by-play events for completed current-season games missing from
         nba.play_by_play.
@@ -815,59 +854,65 @@ class NBAComponent:
             ORDER BY g.game_id
             """
         )
-        
+
         if game_ids.is_empty():
             logger.info("nba.play_by_play: no new games to fetch")
             return
-        
+
         logger.info("nba.play_by_play: fetching %d games", len(game_ids))
-        
+
         dfs = []
         failed = []
-        
+
         for idx, game_id in enumerate(game_ids["game_id"].to_list()):
             game_id_str = f"00{game_id}"
-            
-            logger.debug("processing game_id %s (%d/%d)", game_id_str, idx + 1, len(game_ids))
-            
+
+            logger.debug(
+                "processing game_id %s (%d/%d)", game_id_str, idx + 1, len(game_ids)
+            )
+
             try:
                 pbp = nba_ep.playbyplayv3.PlayByPlayV3(game_id=game_id_str)
-                
+
                 df = (
                     pl.from_pandas(pbp.play_by_play.get_data_frame())
                     .clean_names(case_type="snake")
                     .with_columns(pl.col("game_id").cast(pl.Int64))
                 )
-                
+
                 if df.is_empty():
-                    logger.debug("game_id %s returned no play-by-play events", game_id_str)
+                    logger.debug(
+                        "game_id %s returned no play-by-play events", game_id_str
+                    )
                 else:
                     dfs.append(df)
-                
+
             except Exception:
                 logger.exception("game_id %s failed", game_id_str)
                 failed.append(game_id_str)
-            
+
             time.sleep(1)
-            
+
             if (idx + 1) % 10 == 0:
-                logger.info("play_by_play: %d/%d games processed", idx + 1, len(game_ids))
-        
+                logger.info(
+                    "play_by_play: %d/%d games processed", idx + 1, len(game_ids)
+                )
+
         if failed:
             logger.warning("play_by_play: %d game(s) failed: %s", len(failed), failed)
-        
+
         if not dfs:
             logger.error("play_by_play: nothing fetched, skipping write")
             return
-        
+
         df = pl.concat(dfs)
         self.db.write_ordered(df, "play_by_play", schema="nba")
         logger.info("nba.play_by_play has been updated (%d rows)", len(df))
 
-    def backfill_play_by_play(self, seasons=None):
+    def backfill_play_by_play(self, seasons: list[str] | None = None) -> None:
         """
         Backfill play-by-play for historical seasons.
-        
+
         Args:
             seasons: List of season strings like ["2023-24", "2024-25"].
                      If None, backfills from 2009-10 to current season.
@@ -882,16 +927,19 @@ class NBAComponent:
         if seasons is None:
             start_year = 2009
             end_year = self.ctx.cur_season_year
-            seasons = [f"{year}-{str(year + 1)[2:]}" for year in range(start_year, end_year + 1)]
-        
+            seasons = [
+                f"{year}-{str(year + 1)[2:]}"
+                for year in range(start_year, end_year + 1)
+            ]
+
         logger.info("play_by_play backfill: processing %d seasons", len(seasons))
-        
+
         total_rows = 0
         failed_dates = []
-        
+
         for season in seasons:
             logger.info("play_by_play backfill: processing season %s", season)
-            
+
             # Get all game_dates for this season
             game_dates = self.db.read(
                 f"""
@@ -902,13 +950,15 @@ class NBAComponent:
                 ORDER BY game_date
                 """
             )
-            
+
             if game_dates.is_empty():
                 logger.warning("play_by_play backfill: no games found for %s", season)
                 continue
-            
-            logger.info("play_by_play backfill: %d game dates in %s", len(game_dates), season)
-            
+
+            logger.info(
+                "play_by_play backfill: %d game dates in %s", len(game_dates), season
+            )
+
             # Process each date
             for date_idx, game_date in enumerate(game_dates["game_date"].to_list()):
                 # Get games for this specific date
@@ -922,7 +972,7 @@ class NBAComponent:
                     ORDER BY game_id
                     """
                 )
-                
+
                 # Check which games are already in the table
                 existing_games = self.db.read(
                     f"""
@@ -931,7 +981,7 @@ class NBAComponent:
                     WHERE game_id IN ({", ".join(str(g) for g in all_game_ids["game_id"].to_list())})
                     """
                 )
-                
+
                 # Only fetch games not already in the table
                 if existing_games.is_empty():
                     game_ids = all_game_ids
@@ -939,72 +989,109 @@ class NBAComponent:
                     game_ids = all_game_ids.join(
                         existing_games, on="game_id", how="anti"
                     )
-                
+
                 if game_ids.is_empty():
-                    logger.debug("backfill %s %s: all games already in table, skipping",
-                               season, game_date)
+                    logger.debug(
+                        "backfill %s %s: all games already in table, skipping",
+                        season,
+                        game_date,
+                    )
                     continue
-                
+
                 dfs = []
                 failed_games = []
-                
+
                 for idx, game_id in enumerate(game_ids["game_id"].to_list()):
                     game_id_str = f"00{game_id}"
-                    
-                    logger.debug("backfill %s %s: game_id %s (%d/%d)", 
-                                season, game_date, game_id_str, idx + 1, len(game_ids))
-                    
+
+                    logger.debug(
+                        "backfill %s %s: game_id %s (%d/%d)",
+                        season,
+                        game_date,
+                        game_id_str,
+                        idx + 1,
+                        len(game_ids),
+                    )
+
                     try:
                         pbp = nba_ep.playbyplayv3.PlayByPlayV3(game_id=game_id_str)
-                        
+
                         df = (
                             pl.from_pandas(pbp.play_by_play.get_data_frame())
                             .clean_names(case_type="snake")
                             .with_columns(pl.col("game_id").cast(pl.Int64))
                         )
-                        
+
                         if len(df) > 0:
                             dfs.append(df)
                         else:
                             # API returns empty for very old games - log once per date
                             if idx == 0:
-                                logger.debug("backfill %s %s: API returns empty data (game too old?)",
-                                           season, game_date)
-                        
+                                logger.debug(
+                                    "backfill %s %s: API returns empty data (game too old?)",
+                                    season,
+                                    game_date,
+                                )
+
                     except Exception:
-                        logger.exception("backfill %s %s: game_id %s failed", 
-                                       season, game_date, game_id_str)
+                        logger.exception(
+                            "backfill %s %s: game_id %s failed",
+                            season,
+                            game_date,
+                            game_id_str,
+                        )
                         failed_games.append(game_id_str)
-                    
+
                     time.sleep(1)
-                
+
                 if failed_games:
-                    logger.warning("backfill %s %s: %d game(s) failed", 
-                                 season, game_date, len(failed_games))
+                    logger.warning(
+                        "backfill %s %s: %d game(s) failed",
+                        season,
+                        game_date,
+                        len(failed_games),
+                    )
                     failed_dates.append(f"{season} {game_date}")
-                
+
                 if not dfs:
-                    logger.info("backfill %s %s: no new games to fetch (all already in table or too old)",
-                              season, game_date)
+                    logger.info(
+                        "backfill %s %s: no new games to fetch (all already in table or too old)",
+                        season,
+                        game_date,
+                    )
                     continue
-                
+
                 # Write this date's new data (append only, no delete needed)
                 df = pl.concat(dfs)
-                logger.info("backfill %s %s: %d rows from %d new game(s)",
-                           season, game_date, len(df), len(dfs))
+                logger.info(
+                    "backfill %s %s: %d rows from %d new game(s)",
+                    season,
+                    game_date,
+                    len(df),
+                    len(dfs),
+                )
                 self.db.write_ordered(df, "play_by_play", schema="nba")
-                
+
                 total_rows += len(df)
-                
+
                 if (date_idx + 1) % 10 == 0:
-                    logger.info("backfill %s: %d/%d dates processed, %d total rows", 
-                              season, date_idx + 1, len(game_dates), total_rows)
-        
-        logger.info("play_by_play backfill complete: %d total rows across %d seasons", 
-                    total_rows, len(seasons))
-        
+                    logger.info(
+                        "backfill %s: %d/%d dates processed, %d total rows",
+                        season,
+                        date_idx + 1,
+                        len(game_dates),
+                        total_rows,
+                    )
+
+        logger.info(
+            "play_by_play backfill complete: %d total rows across %d seasons",
+            total_rows,
+            len(seasons),
+        )
+
         if failed_dates:
-            logger.warning("backfill had failures on %d date(s): %s", 
-                         len(failed_dates), failed_dates[:10])
-
-
+            logger.warning(
+                "backfill had failures on %d date(s): %s",
+                len(failed_dates),
+                failed_dates[:10],
+            )

@@ -14,9 +14,7 @@ def credentials_path(explicit: str | None = None) -> str:
     (e.g. /run/secrets/credentials.ini) without changing caller code.
     """
     return (
-        explicit
-        or os.environ.get(ENV_CREDENTIALS_INI)
-        or str(DEFAULT_CREDENTIALS_INI)
+        explicit or os.environ.get(ENV_CREDENTIALS_INI) or str(DEFAULT_CREDENTIALS_INI)
     )
 
 

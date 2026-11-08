@@ -1,10 +1,11 @@
 import logging
 
 import polars as pl
-from scs_hub.db import Database
+
 from scs_hub.context import Context
-from scs_hub.nba import NBAComponent
+from scs_hub.db import Database
 from scs_hub.fty import FtyComponent
+from scs_hub.nba import NBAComponent
 from scs_hub.statyx import StatyxComponent
 from scs_hub.utility import UtilComponent
 
@@ -23,7 +24,13 @@ class SportsHub:
         hub.util.conform_player_ids()   # resolve any new player ids
     """
 
-    def __init__(self, db_con: str | None = None, sport: str = "nba", leagues: pl.DataFrame | None = None, ini_path: str | None = None):
+    def __init__(
+        self,
+        db_con: str | None = None,
+        sport: str = "nba",
+        leagues: pl.DataFrame | None = None,
+        ini_path: str | None = None,
+    ) -> None:
         # Components log progress and row counts at INFO. Python drops INFO when
         # nothing has configured logging, which is why a plain script sees silence.
         # basicConfig is a no-op if handlers already exist, so a caller's own
@@ -41,6 +48,8 @@ class SportsHub:
         self.sport = sport
 
         self.nba = NBAComponent(self.db, self.ctx)
-        self.fty = FtyComponent(self.db, self.ctx, sport, leagues if leagues is not None else pl.DataFrame())
+        self.fty = FtyComponent(
+            self.db, self.ctx, sport, leagues if leagues is not None else pl.DataFrame()
+        )
         self.statyx = StatyxComponent(self.db, self.ctx, sport=sport)
         self.util = UtilComponent(self.db, self.ctx)

@@ -2,6 +2,7 @@ import configparser
 import logging
 import re
 from collections import defaultdict
+from typing import Any
 
 import polars as pl
 import sqlalchemy
@@ -51,6 +52,7 @@ TRANSPORT_SKIP = {
 # parameters, so they are validated rather than quoted.
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+
 class Database:
     """
     Owns connection credentials and a single SQLAlchemy engine for one
@@ -59,16 +61,17 @@ class Database:
     object rather than opening its own connections.
     """
 
-    def __init__(self, db_con: str | None = None, ini_path: str | None = None):
+    def __init__(self, db_con: str | None = None, ini_path: str | None = None) -> None:
         self.ini_path = credentials_path(ini_path)
         self.engine: sqlalchemy.Engine | None = None
         if db_con:
             self.connect(db_con)
         else:
-            msg = "Database: no connection specified — call db.connect(db_con) to connect"
+            msg = (
+                "Database: no connection specified — call db.connect(db_con) to connect"
+            )
             logger.warning(msg)
             self.engine = None
-            
 
     def connect(self, db_con: str) -> None:
         """Build and store the engine for a credentials.ini section."""
@@ -77,8 +80,7 @@ class Database:
         parser.read(self.ini_path)
         if not parser.has_section(db_con):
             raise ValueError(
-                f"No [{db_con}] section in {self.ini_path} "
-                f"(found: {parser.sections()})"
+                f"No [{db_con}] section in {self.ini_path} (found: {parser.sections()})"
             )
 
         db_creds = dict(parser.items(db_con))
@@ -86,9 +88,11 @@ class Database:
         for key, value in db_creds.items():
             sql_url = sql_url.replace(key, value)
 
-        self.engine = sqlalchemy.create_engine(sql_url, connect_args={"connect_timeout": TIMEOUT})
+        self.engine = sqlalchemy.create_engine(
+            sql_url, connect_args={"connect_timeout": TIMEOUT}
+        )
 
-    def read(self, query: str, **kwargs) -> pl.DataFrame:
+    def read(self, query: str, **kwargs: Any) -> pl.DataFrame:
         """Run a SQL query, get a Polars DataFrame back.
         Extra kwargs (e.g. schema_overrides) pass through to pl.read_database."""
         return pl.read_database(query, self.engine, infer_schema_length=None, **kwargs)
@@ -122,7 +126,9 @@ class Database:
         if reg.is_empty():
             logger.info(
                 "%s.%s has no util.table_column_order rows — keeping all %d columns as-is",
-                schema, table, df.width,
+                schema,
+                table,
+                df.width,
             )
             return df
 
@@ -130,7 +136,9 @@ class Database:
         renames = dict(zip(mapped["origin_name"], mapped["column_name"]))
         return df.rename(renames).select(reg["column_name"].to_list())
 
-    def write_ordered(self, df: pl.DataFrame, table: str, schema: str, order_key: str | None = None) -> None:
+    def write_ordered(
+        self, df: pl.DataFrame, table: str, schema: str, order_key: str | None = None
+    ) -> None:
         """
         Conform a frame to its registration, then write to <schema>.<table>.
 
@@ -182,7 +190,9 @@ class Database:
         """
         roles = (role,) if isinstance(role, str) else tuple(role)
         if not roles:
-            raise ValueError("regrant_read: role must be a name or a non-empty list/tuple")
+            raise ValueError(
+                "regrant_read: role must be a name or a non-empty list/tuple"
+            )
         for ident in (*roles, *schemas):
             if not _IDENT.match(ident):
                 raise ValueError(f"regrant_read: unsafe identifier {ident!r}")
@@ -209,7 +219,9 @@ class Database:
             granted.append(schema)
             logger.info(
                 "regrant_read: SELECT on %d object(s) in %s granted to %s",
-                len(names), schema, role_list,
+                len(names),
+                schema,
+                role_list,
             )
 
         return granted
@@ -250,11 +262,14 @@ class Database:
             "  AND table_name NOT ILIKE '%\\_retired' ESCAPE '\\'"
         )
         names = sorted(
-            f"{r['table_schema']}.{r['table_name']}" for r in tables.iter_rows(named=True)
+            f"{r['table_schema']}.{r['table_name']}"
+            for r in tables.iter_rows(named=True)
         )
         logger.info(
             "deduplicate_tables: %d candidate table(s) for season %s%s",
-            len(names), season, " (dry run)" if dry_run else "",
+            len(names),
+            season,
+            " (dry run)" if dry_run else "",
         )
 
         changed = []
@@ -270,7 +285,10 @@ class Database:
             changed.append(table)
             logger.info(
                 "%s: %d row(s) -> %d, dropping %d duplicate(s)%s",
-                table, df.height, deduped.height, df.height - deduped.height,
+                table,
+                df.height,
+                deduped.height,
+                df.height - deduped.height,
                 " (dry run, not written)" if dry_run else "",
             )
             if dry_run:
@@ -280,7 +298,9 @@ class Database:
             # neither does, so an interrupted run cannot leave a season empty.
             with self.engine.begin() as conn:
                 conn.execute(
-                    sqlalchemy.sql.text(f"DELETE FROM {table} WHERE season = '{season}'")
+                    sqlalchemy.sql.text(
+                        f"DELETE FROM {table} WHERE season = '{season}'"
+                    )
                 )
                 deduped.write_database(table, conn, if_table_exists="append")
 
@@ -361,16 +381,22 @@ class Database:
                 logger.info("transport: skipped %s (no season column)", key)
                 continue
             try:
-                moved[key] = self._transport_table(source, schema, table, strategy, season, dry_run)
+                moved[key] = self._transport_table(
+                    source, schema, table, strategy, season, dry_run
+                )
             except Exception:
                 logger.exception("transport: %s (%s) failed", key, strategy)
                 failed.append(key)
 
         if failed:
-            raise RuntimeError(f"transport: {len(failed)} table(s) failed: {', '.join(failed)}")
+            raise RuntimeError(
+                f"transport: {len(failed)} table(s) failed: {', '.join(failed)}"
+            )
         logger.info(
             "transport: %d table(s) from %s%s",
-            len(moved), season, " (dry run)" if dry_run else "",
+            len(moved),
+            season,
+            " (dry run)" if dry_run else "",
         )
         return moved
 
@@ -391,7 +417,11 @@ class Database:
         frame = source.read(f"SELECT * FROM {schema}.{table} WHERE {where}")
         logger.info(
             "transport: %s.%s (%s) %d row(s)%s",
-            schema, table, strategy, frame.height, " (dry run, not written)" if dry_run else "",
+            schema,
+            table,
+            strategy,
+            frame.height,
+            " (dry run, not written)" if dry_run else "",
         )
         if dry_run:
             return frame.height
@@ -424,7 +454,11 @@ class Database:
                 f"WHERE season = '{season}'"
             )["game_id"].to_list()
             if not ids:
-                logger.info("transport: %s.%s has no games for %s", schema, table, season)
+                logger.info(
+                    "transport: %s.%s has no games for %s", schema, table, season
+                )
                 return None
             return f"game_id IN ({', '.join(str(int(g)) for g in ids)})"
-        raise ValueError(f"transport_from: unknown strategy {strategy!r} for {schema}.{table}")
+        raise ValueError(
+            f"transport_from: unknown strategy {strategy!r} for {schema}.{table}"
+        )

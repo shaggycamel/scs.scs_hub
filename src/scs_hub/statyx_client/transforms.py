@@ -1,5 +1,5 @@
 import datetime as dt
-from typing import Callable
+from collections.abc import Callable
 
 import polars as pl
 import polars.selectors as cs
@@ -16,6 +16,7 @@ def merge_subdicts(*fields: str) -> Callable[[dict], list[dict]]:
     as struct columns and locks each field's dtype from the first row, so a later
     row whose value lands on a whole number fails to build.
     """
+
     def flatten(row: dict) -> list[dict]:
         out = {k: v for k, v in row.items() if k not in fields}
         for field in fields:
@@ -23,6 +24,7 @@ def merge_subdicts(*fields: str) -> Callable[[dict], list[dict]]:
             if sub:
                 out.update(sub)
         return [out]
+
     return flatten
 
 
@@ -34,18 +36,24 @@ def flatten_distributions(*fields: str) -> Callable[[dict], list[dict]]:
     long form instead: one row per bucket, tagged by which distribution it came
     from. Tagging also avoids a cross product when a row carries several maps.
     """
+
     def flatten(row: dict) -> list[dict]:
         base = {k: v for k, v in row.items() if k not in fields}
         results = []
         for field in fields:
             for bucket, probability in (row.get(field) or {}).items():
-                results.append({
-                    **base,
-                    "distribution": field.removesuffix("_json").removesuffix("_distribution"),
-                    "bucket": bucket,
-                    "probability": probability,
-                })
+                results.append(
+                    {
+                        **base,
+                        "distribution": field.removesuffix("_json").removesuffix(
+                            "_distribution"
+                        ),
+                        "bucket": bucket,
+                        "probability": probability,
+                    }
+                )
         return results
+
     return flatten
 
 
@@ -55,11 +63,8 @@ def flatten_team_shot_locations(row: dict) -> list[dict]:
     name is data rather than a field. Expand to one row per zone.
     """
     base = {k: v for k, v in row.items() if k != "stats"}
-    zones = ((row.get("stats") or {}).get("shot_zones") or {})
-    return [
-        {**base, "shot_zone": zone, **stats}
-        for zone, stats in zones.items()
-    ]
+    zones = (row.get("stats") or {}).get("shot_zones") or {}
+    return [{**base, "shot_zone": zone, **stats} for zone, stats in zones.items()]
 
 
 def flatten_shotmap(row: dict) -> list[dict]:
@@ -85,10 +90,17 @@ def flatten_usage_shock(row: dict) -> list[dict]:
     for teammate in row.get("teammates", []):
         teammate_base = {
             **base,
-            **{k: v for k, v in teammate.items() if k not in ("deltas", "withStats", "withoutStats")},
+            **{
+                k: v
+                for k, v in teammate.items()
+                if k not in ("deltas", "withStats", "withoutStats")
+            },
             **teammate.get("deltas", {}),
         }
-        for context, stats in (("with", teammate.get("withStats")), ("without", teammate.get("withoutStats"))):
+        for context, stats in (
+            ("with", teammate.get("withStats")),
+            ("without", teammate.get("withoutStats")),
+        ):
             if stats:
                 results.append({**teammate_base, "context": context, **stats})
     return results

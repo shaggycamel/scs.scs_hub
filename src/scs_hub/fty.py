@@ -1,7 +1,11 @@
 import configparser
 import logging
+from typing import Any
 
 import polars as pl
+
+from scs_hub.context import Context
+from scs_hub.db import Database
 from scs_hub.fty_handlers import HANDLERS
 
 logger = logging.getLogger(__name__)
@@ -35,7 +39,14 @@ class FtyComponent:
     NBA-only and didn't have one — add it before running this for real.
     """
 
-    def __init__(self, db, ctx, sport: str, leagues: pl.DataFrame, schema: str = "fty"):
+    def __init__(
+        self,
+        db: Database,
+        ctx: Context,
+        sport: str,
+        leagues: pl.DataFrame,
+        schema: str = "fty",
+    ) -> None:
         self.db = db
         self.ctx = ctx
         self.sport = sport
@@ -43,7 +54,9 @@ class FtyComponent:
         self.handlers = {key: cls(db, schema) for key, cls in HANDLERS.items()}
         self.leagues = self._connect_leagues(leagues)
 
-    def connect_leagues(self, leagues: pl.DataFrame | None = None, season: str | None = None) -> None:
+    def connect_leagues(
+        self, leagues: pl.DataFrame | None = None, season: str | None = None
+    ) -> None:
         """
         (Re)connect to a set of leagues after this component has already
         been constructed — e.g. when `leagues` isn't known until after
@@ -59,7 +72,9 @@ class FtyComponent:
             leagues = self._registered_leagues(season or self.ctx.cur_season)
 
         self.leagues = self._connect_leagues(leagues)
-        self.league_ids = ', '.join(map(str, {league_id for _, _, league_id in self.leagues}))
+        self.league_ids = ", ".join(
+            map(str, {league_id for _, _, league_id in self.leagues})
+        )
 
     def _registered_leagues(self, season: str) -> pl.DataFrame:
         """
@@ -100,14 +115,16 @@ class FtyComponent:
             # Date keeps the arithmetic valid (all-null stays all-null) so the
             # is_not_null guard can do its job.
             finish_date = pl.col("finish_date").cast(pl.Date)
-            finished = (
-                finish_date.is_not_null()
-                & ((finish_date + pl.duration(days=1)) < pl.lit(self.ctx.date_est))
+            finished = finish_date.is_not_null() & (
+                (finish_date + pl.duration(days=1)) < pl.lit(self.ctx.date_est)
             )
             for r in leagues.filter(finished).iter_rows(named=True):
                 logger.info(
                     "%s;%s: season %s finished on %s — skipping connection",
-                    r["platform"], r["league_id"], season, r["finish_date"],
+                    r["platform"],
+                    r["league_id"],
+                    season,
+                    r["finish_date"],
                 )
             leagues = leagues.filter(~finished)
 
@@ -161,11 +178,19 @@ class FtyComponent:
 
         connected = {}
         for row in leagues.iter_rows(named=True):
-            platform, league_id, row_creds = row["platform"], row["league_id"], row["credentials"]
+            platform, league_id, row_creds = (
+                row["platform"],
+                row["league_id"],
+                row["credentials"],
+            )
             key = (self.sport, platform)
 
             if key not in self.handlers:
-                logger.warning("No handler registered for %s (league %s) — skipping", key, league_id)
+                logger.warning(
+                    "No handler registered for %s (league %s) — skipping",
+                    key,
+                    league_id,
+                )
                 continue
 
             # The row's own season wins, so a league registered for 2023-24
@@ -179,7 +204,8 @@ class FtyComponent:
             # an earlier season silently a no-op.
             row_season = row.get("season")
             season_year = (
-                self._season_year_from(row_season) if row_season
+                self._season_year_from(row_season)
+                if row_season
                 else self._season_year_for(self.sport)
             )
             context = {**row_creds, "league_id": league_id, "cur_year": season_year}
@@ -228,7 +254,7 @@ class FtyComponent:
             f"DELETE FROM {self.schema}.{table} WHERE (season, league_id) IN ({pairs})"
         )
 
-    def get_league(self):
+    def get_league(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_league")
             return
@@ -238,7 +264,7 @@ class FtyComponent:
         self.db.write(df, "league", schema=self.schema)
         logger.info(f"{self.schema}.league has been updated (%d rows)", len(df))
 
-    def get_league_categories(self):
+    def get_league_categories(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_league_categories")
             return
@@ -246,9 +272,11 @@ class FtyComponent:
         self._delete_connected("league_categories")
         df = pl.concat(self._dispatch("get_league_categories"), how="diagonal_relaxed")
         self.db.write(df, "league_categories", schema=self.schema)
-        logger.info(f"{self.schema}.league_categories has been updated (%d rows)", len(df))
+        logger.info(
+            f"{self.schema}.league_categories has been updated (%d rows)", len(df)
+        )
 
-    def get_free_agents(self):
+    def get_free_agents(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_free_agents")
             return
@@ -258,7 +286,7 @@ class FtyComponent:
         self.db.write(df, "free_agents", schema=self.schema)
         logger.info(f"{self.schema}.free_agents has been updated (%d rows)", len(df))
 
-    def get_league_competitor(self):
+    def get_league_competitor(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_league_competitor")
             return
@@ -266,9 +294,11 @@ class FtyComponent:
         self._delete_connected("league_competitor")
         df = pl.concat(self._dispatch("get_league_competitor"), how="diagonal_relaxed")
         self.db.write(df, "league_competitor", schema=self.schema)
-        logger.info(f"{self.schema}.league_competitor has been updated (%d rows)", len(df))
+        logger.info(
+            f"{self.schema}.league_competitor has been updated (%d rows)", len(df)
+        )
 
-    def get_league_matchup(self):
+    def get_league_matchup(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_league_matchup")
             return
@@ -278,7 +308,7 @@ class FtyComponent:
         self.db.write(df, "league_matchup", schema=self.schema)
         logger.info(f"{self.schema}.league_matchup has been updated (%d rows)", len(df))
 
-    def get_league_matchup_dates(self):
+    def get_league_matchup_dates(self) -> None:
         """
         Derive matchup period dates for the connected leagues.
 
@@ -299,21 +329,27 @@ class FtyComponent:
             logger.warning("No leagues connected — skipping get_league_matchup_dates")
             return
 
-        df = pl.concat(self._dispatch("get_league_matchup_dates"), how="diagonal_relaxed")
+        df = pl.concat(
+            self._dispatch("get_league_matchup_dates"), how="diagonal_relaxed"
+        )
         self._delete_connected("league_matchup_dates")
         self.db.write(df, "league_matchup_dates", schema=self.schema)
-        logger.info(f"{self.schema}.league_matchup_dates has been updated (%d rows)", len(df))
+        logger.info(
+            f"{self.schema}.league_matchup_dates has been updated (%d rows)", len(df)
+        )
 
-    def get_recent_activity(self):
+    def get_recent_activity(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_recent_activity")
             return
 
         df = pl.concat(self._dispatch("get_recent_activity"), how="diagonal_relaxed")
         self.db.write(df, "recent_activity", schema=self.schema)
-        logger.info(f"{self.schema}.recent_activity has been updated (%d rows)", len(df))
+        logger.info(
+            f"{self.schema}.recent_activity has been updated (%d rows)", len(df)
+        )
 
-    def get_competitor_roster(self):
+    def get_competitor_roster(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_competitor_roster")
             return
@@ -343,7 +379,7 @@ class FtyComponent:
 
         self.db.write_ordered(df, "competitor_roster", schema=self.schema)
 
-    def _matchup_periods(self, con, matchup_period: int | None) -> list[int]:
+    def _matchup_periods(self, con: Any, matchup_period: int | None) -> list[int]:
         """
         Periods a scheduled run should refresh.
 
@@ -358,7 +394,7 @@ class FtyComponent:
         current = con.currentMatchupPeriod
         return [p for p in (current - 1, current) if p is not None and p >= 1]
 
-    def get_matchup_box_score(self, matchup_period: int | None = None):
+    def get_matchup_box_score(self, matchup_period: int | None = None) -> None:
         """
         Box scores for the current and just-closed matchup periods.
 
@@ -373,7 +409,11 @@ class FtyComponent:
         for (sport, platform, league_id), con in self.leagues.items():
             handler = self.handlers[(sport, platform)]
             for period in self._matchup_periods(con, matchup_period):
-                logger.info(f"%s;%s {self.schema}.matchup_box_score ({period})", platform, league_id)
+                logger.info(
+                    f"%s;%s {self.schema}.matchup_box_score ({period})",
+                    platform,
+                    league_id,
+                )
                 df = handler.get_matchup_box_score(con, period)
 
                 if df.is_empty():
@@ -398,7 +438,7 @@ class FtyComponent:
                     len(df),
                 )
 
-    def get_matchup_result(self, matchup_period: int | None = None):
+    def get_matchup_result(self, matchup_period: int | None = None) -> None:
         """
         The outcome of the current and just-closed matchup periods, one row per
         competitor.
@@ -415,7 +455,11 @@ class FtyComponent:
         for (sport, platform, league_id), con in self.leagues.items():
             handler = self.handlers[(sport, platform)]
             for period in self._matchup_periods(con, matchup_period):
-                logger.info(f"%s;%s {self.schema}.matchup_result ({period})", platform, league_id)
+                logger.info(
+                    f"%s;%s {self.schema}.matchup_result ({period})",
+                    platform,
+                    league_id,
+                )
                 df = handler.get_matchup_result(con, period)
 
                 if df.is_empty():
@@ -440,7 +484,7 @@ class FtyComponent:
                     len(df),
                 )
 
-    def backfill_matchups(self, periods=None) -> None:
+    def backfill_matchups(self, periods: list[int] | None = None) -> None:
         """
         Refetch box scores and results for every matchup period a league has
         played, rather than only the current one.
@@ -464,12 +508,17 @@ class FtyComponent:
             return
 
         for (sport, platform, league_id), con in self.leagues.items():
-            available = periods or sorted(
-                p for p in con.matchup_ids if p <= con.currentMatchupPeriod
-            ) or list(range(1, con.currentMatchupPeriod + 1))
+            available = (
+                periods
+                or sorted(p for p in con.matchup_ids if p <= con.currentMatchupPeriod)
+                or list(range(1, con.currentMatchupPeriod + 1))
+            )
             logger.info(
-                "%s;%s backfilling matchups %s-%s", platform, league_id,
-                min(available, default=0), max(available, default=0),
+                "%s;%s backfilling matchups %s-%s",
+                platform,
+                league_id,
+                min(available, default=0),
+                max(available, default=0),
             )
             for matchup_period in available:
                 for table in ("matchup_box_score", "matchup_result"):
@@ -485,7 +534,7 @@ class FtyComponent:
                     self.db.write(df, table, schema=self.schema)
             logger.info("%s;%s backfill complete", platform, league_id)
 
-    def get_league_byes(self):
+    def get_league_byes(self) -> None:
         if not self.leagues:
             logger.warning("No leagues connected — skipping get_league_byes")
             return
@@ -501,4 +550,9 @@ class FtyComponent:
                 f"AND platform = '{platform}' AND league_id = {league_id}"
             )
             self.db.write(df, "league_byes", schema=self.schema)
-            logger.info(f"%s;%s {self.schema}.league_byes has been updated (%d rows)", platform, league_id, len(df))
+            logger.info(
+                f"%s;%s {self.schema}.league_byes has been updated (%d rows)",
+                platform,
+                league_id,
+                len(df),
+            )

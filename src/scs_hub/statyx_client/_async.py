@@ -1,8 +1,12 @@
 import asyncio
 import concurrent.futures
+from collections.abc import Coroutine
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 
-def run_coro(coro):
+def run_coro(coro: Coroutine[Any, Any, T]) -> T:
     """
     Run a coroutine to completion, whether or not an event loop is already
     running in this thread. Plain scripts / python REPL have no running loop,

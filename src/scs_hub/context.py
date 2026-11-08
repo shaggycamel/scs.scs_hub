@@ -1,8 +1,12 @@
 import datetime as dt
 import zoneinfo
-import polars as pl
+
 import nba_api.stats.library.parameters as nba_parameters
+import polars as pl
 from nba_api.stats.static import teams
+
+from scs_hub.db import Database
+
 
 class Context:
     """
@@ -16,7 +20,7 @@ class Context:
     over the box scores rather than being cheap to compute up front.
     """
 
-    def __init__(self, db_con):
+    def __init__(self, db_con: Database) -> None:
 
         self._db = db_con
         self._active_ids: dict[tuple[str, str], list[int]] = {}
@@ -61,12 +65,10 @@ class Context:
         key = (platform, season)
 
         if key not in self._active_ids:
-            self._active_ids[key] = (
-                self._db.read(
-                    "SELECT source_id FROM util.active_player_vw "
-                    f"WHERE platform = '{platform}' AND season = '{season}' "
-                    "ORDER BY source_id"
-                )["source_id"].to_list()
-            )
+            self._active_ids[key] = self._db.read(
+                "SELECT source_id FROM util.active_player_vw "
+                f"WHERE platform = '{platform}' AND season = '{season}' "
+                "ORDER BY source_id"
+            )["source_id"].to_list()
 
         return self._active_ids[key]

@@ -1,9 +1,13 @@
 import datetime as dt
 import logging
+from typing import Any
 
+import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
 import polars as pl
 import polars.selectors as cs
-import janitor.polars  # noqa: F401  (registers .clean_names() on pl.DataFrame)
+
+from scs_hub.context import Context
+from scs_hub.db import Database
 from scs_hub.statyx_client import StatyxPipeline, infer_dtypes
 
 logger = logging.getLogger(__name__)
@@ -12,7 +16,7 @@ logger = logging.getLogger(__name__)
 class StatyxComponent:
     """Statyx API data (advanced stats, shot zones, on/off splits) — writes into the statyx.* schema."""
 
-    def __init__(self, db, ctx, sport: str = "nba"):
+    def __init__(self, db: Database, ctx: Context, sport: str = "nba") -> None:
         self.db = db
         self.ctx = ctx
         self.pipeline = StatyxPipeline(sport=sport, ini_path=db.ini_path)
@@ -40,7 +44,9 @@ class StatyxComponent:
             fetch["since"] = str(newest + dt.timedelta(days=1))
         return {**fetch, **params}
 
-    def _replace_season(self, table: str, season: str, extra: str | None = None) -> None:
+    def _replace_season(
+        self, table: str, season: str, extra: str | None = None
+    ) -> None:
         """
         Delete one season's rows before a wholesale rewrite.
 
@@ -54,7 +60,7 @@ class StatyxComponent:
             where += f" AND {extra}"
         self.db.delete_where(table, "statyx", where)
 
-    def get_schedule(self, season: str | None = None, **params):
+    def get_schedule(self, season: str | None = None, **params: Any) -> None:
         """League schedule via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.schedule")
@@ -71,7 +77,9 @@ class StatyxComponent:
             df.clean_names(case_type="snake")
             .with_columns(pl.lit(season).alias("season"))
             .pipe(infer_dtypes)
-            .with_columns(cs.by_dtype(pl.Datetime("us", "UTC")).dt.replace_time_zone(None) )
+            .with_columns(
+                cs.by_dtype(pl.Datetime("us", "UTC")).dt.replace_time_zone(None)
+            )
         )
 
         # Schedule rows mutate as the season runs — scores land, games move — so
@@ -81,7 +89,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "schedule", schema="statyx")
 
-    def get_player_info(self, season: str | None = None, **params):
+    def get_player_info(self, season: str | None = None, **params: Any) -> None:
         """
         Player biographical directory via the Statyx API, one snapshot per season.
 
@@ -112,7 +120,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "player_info", schema="statyx")
 
-    def get_team_roster(self, season: str | None = None, **params):
+    def get_team_roster(self, season: str | None = None, **params: Any) -> None:
         """
         Team rosters via the Statyx player directory, as open/closed spells.
 
@@ -125,8 +133,16 @@ class StatyxComponent:
         """
         season = season or self.ctx.cur_season
         today = self.ctx.date_est
-        cols = ["season", "team_id", "team_abbr", "team_name",
-                "player_id", "full_name", "position", "jersey_number"]
+        cols = [
+            "season",
+            "team_id",
+            "team_abbr",
+            "team_name",
+            "player_id",
+            "full_name",
+            "position",
+            "jersey_number",
+        ]
 
         logger.info("statyx.team_roster")
         df = self.pipeline.run("players", params={"active": "true", **params})
@@ -153,8 +169,13 @@ class StatyxComponent:
         else:
             open_spells = self.db.read(
                 f"SELECT * FROM statyx.team_roster WHERE season = '{season}' AND exit_date IS NULL",
-                schema_overrides={"season": pl.String, "team_id": pl.Int64, "player_id": pl.Int64,
-                                  "entry_date": pl.Date, "exit_date": pl.Date},
+                schema_overrides={
+                    "season": pl.String,
+                    "team_id": pl.Int64,
+                    "player_id": pl.Int64,
+                    "entry_date": pl.Date,
+                    "exit_date": pl.Date,
+                },
             )
             if open_spells.is_empty():
                 # First run for a season: with no rows, Polars types the
@@ -167,29 +188,41 @@ class StatyxComponent:
         departures = open_spells.join(current, on=key, how="anti")
 
         if departures.height:
-            pairs = ", ".join(f"({r['team_id']}, {r['player_id']})" for r in departures.iter_rows(named=True))
+            pairs = ", ".join(
+                f"({r['team_id']}, {r['player_id']})"
+                for r in departures.iter_rows(named=True)
+            )
             self.db.delete_where(
-                "team_roster", "statyx",
+                "team_roster",
+                "statyx",
                 f"season = '{season}' AND exit_date IS NULL AND (team_id, player_id) IN ({pairs})",
             )
             self.db.write_ordered(
                 departures.with_columns(pl.lit(today).cast(pl.Date).alias("exit_date")),
-                "team_roster", schema="statyx",
+                "team_roster",
+                schema="statyx",
             )
 
         if arrivals.height:
             entry = None if open_spells.is_empty() else today
             self.db.write_ordered(
-                arrivals.with_columns([
-                    pl.lit(entry).cast(pl.Date).alias("entry_date"),
-                    pl.lit(None).cast(pl.Date).alias("exit_date"),
-                ]),
-                "team_roster", schema="statyx",
+                arrivals.with_columns(
+                    [
+                        pl.lit(entry).cast(pl.Date).alias("entry_date"),
+                        pl.lit(None).cast(pl.Date).alias("exit_date"),
+                    ]
+                ),
+                "team_roster",
+                schema="statyx",
             )
 
-        logger.info("statyx.team_roster: %d arrivals, %d departures", arrivals.height, departures.height)
+        logger.info(
+            "statyx.team_roster: %d arrivals, %d departures",
+            arrivals.height,
+            departures.height,
+        )
 
-    def get_contracts(self, season: str | None = None, **params):
+    def get_contracts(self, season: str | None = None, **params: Any) -> None:
         """Player contracts via the Statyx API, replaced per season.
 
         The season label comes from ctx.cur_season unless one is passed, and is
@@ -216,7 +249,9 @@ class StatyxComponent:
             # rendered as the "YYYY-YY" label the table already stores.
             .with_columns(
                 pl.format(
-                    "{}-{}", pl.col("season"), (pl.col("season") + 1).cast(pl.String).str.slice(-2)
+                    "{}-{}",
+                    pl.col("season"),
+                    (pl.col("season") + 1).cast(pl.String).str.slice(-2),
                 ).alias("season")
             )
             .pipe(infer_dtypes)
@@ -230,7 +265,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "contracts", schema="statyx")
 
-    def get_game_stats(self, season: str | None = None, **params):
+    def get_game_stats(self, season: str | None = None, **params: Any) -> None:
         """Player per-game stats via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
@@ -238,12 +273,19 @@ class StatyxComponent:
         logger.info("statyx.game_stats")
         df = self.pipeline.run(
             "game_stats",
-            params={"season": int(season[:4]), **self._incremental("game_stats", season, params)},
+            params={
+                "season": int(season[:4]),
+                **self._incremental("game_stats", season, params),
+            },
             keys=ls_pl,
         )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
 
         if df.is_empty():
             logger.warning("statyx.game_stats: API returned no rows — nothing written")
@@ -257,7 +299,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "game_stats", schema="statyx")
 
-    def get_advanced_stats(self, season: str | None = None, **params):
+    def get_advanced_stats(self, season: str | None = None, **params: Any) -> None:
         """Advanced per-game stats via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
@@ -265,15 +307,24 @@ class StatyxComponent:
         logger.info("statyx.advanced_stats")
         df = self.pipeline.run(
             "advanced_stats",
-            params={"season": int(season[:4]), **self._incremental("advanced_stats", season, params)},
+            params={
+                "season": int(season[:4]),
+                **self._incremental("advanced_stats", season, params),
+            },
             keys=ls_pl,
         )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
 
         if df.is_empty():
-            logger.warning("statyx.advanced_stats: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.advanced_stats: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -284,11 +335,13 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "advanced_stats", schema="statyx")
 
-    def get_standings(self, season: str | None = None, **params):
+    def get_standings(self, season: str | None = None, **params: Any) -> None:
         """League standings via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.standings")
-        df = self.pipeline.run("standings", params={"season": int(season[:4]), **params})
+        df = self.pipeline.run(
+            "standings", params={"season": int(season[:4]), **params}
+        )
 
         if self.pipeline.errors:
             logger.warning("failed: %s", self.pipeline.errors)
@@ -299,58 +352,75 @@ class StatyxComponent:
 
         df = (
             df.clean_names(case_type="snake")
-            .with_columns([
-                pl.lit(season).alias("season"),
-                pl.lit(self.ctx.date_est).alias("date")
-            ])
+            .with_columns(
+                [
+                    pl.lit(season).alias("season"),
+                    pl.lit(self.ctx.date_est).alias("date"),
+                ]
+            )
             .pipe(infer_dtypes)
         )
 
         # Standings are a daily snapshot, so history is kept per date — only
         # today's rows are replaced, making a same-day re-run idempotent.
         self.db.delete_where(
-            "standings", "statyx", f"season = '{season}' AND date = '{self.ctx.date_est}'"
+            "standings",
+            "statyx",
+            f"season = '{season}' AND date = '{self.ctx.date_est}'",
         )
 
         self.db.write_ordered(df, "standings", schema="statyx")
 
-    def get_play_types(self, season: str | None = None, **params):
+    def get_play_types(self, season: str | None = None, **params: Any) -> None:
         """Player play types via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.play_types")
-        df = self.pipeline.run("play_types", params={"season": season, **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "play_types", params={"season": season, **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.play_types: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.play_types: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
             logger.warning("statyx.play_types: API returned no rows — nothing written")
             return
 
-        df = (
-            df.clean_names(case_type="snake")
-            .pipe(infer_dtypes)
-        )
+        df = df.clean_names(case_type="snake").pipe(infer_dtypes)
 
         self._replace_season("play_types", season)
 
         self.db.write_ordered(df, "play_types", schema="statyx")
 
-    def get_shot_zones(self, season: str | None = None, **params):
+    def get_shot_zones(self, season: str | None = None, **params: Any) -> None:
         """Player shot-zones via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.shot_zones")
-        df = self.pipeline.run("shot_zones", params={"season": int(season[:4]), **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "shot_zones", params={"season": int(season[:4]), **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.shot_zones: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.shot_zones: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
@@ -367,7 +437,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "shot_zones", schema="statyx")
 
-    def get_potential_assists(self, season: str | None = None, **params):
+    def get_potential_assists(self, season: str | None = None, **params: Any) -> None:
         """Player potential assists via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
@@ -375,15 +445,24 @@ class StatyxComponent:
         logger.info("statyx.potential_assists")
         df = self.pipeline.run(
             "potential_assists",
-            params={"season": season, **self._incremental("potential_assists", season, params)},
+            params={
+                "season": season,
+                **self._incremental("potential_assists", season, params),
+            },
             keys=ls_pl,
         )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
 
         if df.is_empty():
-            logger.warning("statyx.potential_assists: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.potential_assists: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -394,21 +473,31 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "potential_assists", schema="statyx")
 
-    def get_shooting_splits(self, season: str | None = None, **params):
+    def get_shooting_splits(self, season: str | None = None, **params: Any) -> None:
         """Player shooting splits via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.shooting_splits")
-        df = self.pipeline.run("shooting_splits", params={"season": int(season[:4]), **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "shooting_splits", params={"season": int(season[:4]), **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.shooting_splits: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.shooting_splits: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
-            logger.warning("statyx.shooting_splits: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.shooting_splits: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -421,16 +510,22 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "shooting_splits", schema="statyx")
 
-    def get_drives(self, season: str | None = None, **params):
+    def get_drives(self, season: str | None = None, **params: Any) -> None:
         """Player drives via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.drives")
-        df = self.pipeline.run("drives", params={"season": int(season[:4]), **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "drives", params={"season": int(season[:4]), **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
             logger.warning("statyx.drives: partial fetch — not replacing stored data")
             return
 
@@ -448,21 +543,33 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "drives", schema="statyx")
 
-    def get_scoring_breakdown(self, season: str | None = None, **params):
+    def get_scoring_breakdown(self, season: str | None = None, **params: Any) -> None:
         """Player scoring breakdown via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.scoring_breakdown")
-        df = self.pipeline.run("scoring_breakdown", params={"season": int(season[:4]), **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "scoring_breakdown",
+            params={"season": int(season[:4]), **params},
+            keys=ls_pl,
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.scoring_breakdown: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.scoring_breakdown: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
-            logger.warning("statyx.scoring_breakdown: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.scoring_breakdown: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -475,21 +582,31 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "scoring_breakdown", schema="statyx")
 
-    def get_assist_profile(self, season: str | None = None, **params):
+    def get_assist_profile(self, season: str | None = None, **params: Any) -> None:
         """Player assist profile via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.assist_profile")
-        df = self.pipeline.run("assist_profile", params={"season": int(season[:4]), **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "assist_profile", params={"season": int(season[:4]), **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.assist_profile: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.assist_profile: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
-            logger.warning("statyx.assist_profile: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.assist_profile: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -502,21 +619,31 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "assist_profile", schema="statyx")
 
-    def get_matchup_history(self, season: str | None = None, **params):
+    def get_matchup_history(self, season: str | None = None, **params: Any) -> None:
         """Player matchup history via the Statyx API."""
         season = season or self.ctx.cur_season
         ls_pl = self.ctx.active_ids("statyx")
 
         logger.info("statyx.matchup_history")
-        df = self.pipeline.run("matchup_history", params={"season": season, **params}, keys=ls_pl)
+        df = self.pipeline.run(
+            "matchup_history", params={"season": season, **params}, keys=ls_pl
+        )
 
         if self.pipeline.errors:
-            logger.warning("%d player(s) failed: %s", len(self.pipeline.errors), self.pipeline.errors)
-            logger.warning("statyx.matchup_history: partial fetch — not replacing stored data")
+            logger.warning(
+                "%d player(s) failed: %s",
+                len(self.pipeline.errors),
+                self.pipeline.errors,
+            )
+            logger.warning(
+                "statyx.matchup_history: partial fetch — not replacing stored data"
+            )
             return
 
         if df.is_empty():
-            logger.warning("statyx.matchup_history: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.matchup_history: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -529,17 +656,21 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "matchup_history", schema="statyx")
 
-    def get_defense_vs_position(self, season: str | None = None, **params):
+    def get_defense_vs_position(self, season: str | None = None, **params: Any) -> None:
         """Defense vs position via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.defense_vs_position")
-        df = self.pipeline.run("defense_vs_position", params={"season": int(season[:4]), **params})
+        df = self.pipeline.run(
+            "defense_vs_position", params={"season": int(season[:4]), **params}
+        )
 
         if self.pipeline.errors:
             logger.warning("failed: %s", self.pipeline.errors)
 
         if df.is_empty():
-            logger.warning("statyx.defense_vs_position: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.defense_vs_position: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -552,17 +683,21 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "defense_vs_position", schema="statyx")
 
-    def get_play_type_defense(self, season: str | None = None, **params):
+    def get_play_type_defense(self, season: str | None = None, **params: Any) -> None:
         """Play type defense via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.play_type_defense")
-        df = self.pipeline.run("play_type_defense", params={"season": int(season[:4]), **params})
+        df = self.pipeline.run(
+            "play_type_defense", params={"season": int(season[:4]), **params}
+        )
 
         if self.pipeline.errors:
             logger.warning("failed: %s", self.pipeline.errors)
 
         if df.is_empty():
-            logger.warning("statyx.play_type_defense: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.play_type_defense: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -575,17 +710,21 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "play_type_defense", schema="statyx")
 
-    def get_shot_zone_defense(self, season: str | None = None, **params):
+    def get_shot_zone_defense(self, season: str | None = None, **params: Any) -> None:
         """Shot zone defense via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.shot_zone_defense")
-        df = self.pipeline.run("shot_zone_defense", params={"season": int(season[:4]), **params})
+        df = self.pipeline.run(
+            "shot_zone_defense", params={"season": int(season[:4]), **params}
+        )
 
         if self.pipeline.errors:
             logger.warning("failed: %s", self.pipeline.errors)
 
         if df.is_empty():
-            logger.warning("statyx.shot_zone_defense: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.shot_zone_defense: API returned no rows — nothing written"
+            )
             return
 
         df = (
@@ -598,7 +737,7 @@ class StatyxComponent:
 
         self.db.write_ordered(df, "shot_zone_defense", schema="statyx")
 
-    def get_usage_shock(self, season: str | None = None, **params):
+    def get_usage_shock(self, season: str | None = None, **params: Any) -> None:
         """Usage shock via the Statyx API."""
         season = season or self.ctx.cur_season
         # /usage-shock takes no season param — it grades a rolling window the
@@ -621,31 +760,38 @@ class StatyxComponent:
 
         windows = df.select("window_start", "window_end").unique()
         if windows.null_count().sum_horizontal().item(0) > 0:
-            logger.warning("statyx.usage_shock: null window in response — not replacing stored data")
+            logger.warning(
+                "statyx.usage_shock: null window in response — not replacing stored data"
+            )
             return
         pairs = ", ".join(
             f"('{r['window_start'].isoformat()}', '{r['window_end'].isoformat()}')"
             for r in windows.iter_rows(named=True)
         )
         self.db.delete_where(
-            "usage_shock", "statyx",
+            "usage_shock",
+            "statyx",
             f"season = '{season.replace(chr(39), chr(39) * 2)}' "
             f"AND (window_start, window_end) IN ({pairs})",
         )
 
         self.db.write_ordered(df, "usage_shock", schema="statyx")
 
-    def get_team_assist_defense(self, season: str | None = None, **params):
+    def get_team_assist_defense(self, season: str | None = None, **params: Any) -> None:
         """Team assist defense via the Statyx API."""
         season = season or self.ctx.cur_season
         logger.info("statyx.team_assist_defense")
-        df = self.pipeline.run("team_assist_defense", params={"season": int(season[:4]), **params})
+        df = self.pipeline.run(
+            "team_assist_defense", params={"season": int(season[:4]), **params}
+        )
 
         if self.pipeline.errors:
             logger.warning("failed: %s", self.pipeline.errors)
 
         if df.is_empty():
-            logger.warning("statyx.team_assist_defense: API returned no rows — nothing written")
+            logger.warning(
+                "statyx.team_assist_defense: API returned no rows — nothing written"
+            )
             return
 
         df = (

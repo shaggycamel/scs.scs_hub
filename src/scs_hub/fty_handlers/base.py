@@ -1,4 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import polars as pl
+
+if TYPE_CHECKING:
+    from scs_hub.db import Database
 
 
 class FtyHandler:
@@ -12,11 +19,11 @@ class FtyHandler:
     per-combination details itself.
     """
 
-    def __init__(self, db, schema: str = "fty"):
+    def __init__(self, db: Database, schema: str = "fty") -> None:
         self.db = db
         self.schema = schema
 
-    def connect(self, league_id: int, season_year: int, creds: dict):
+    def connect(self, league_id: int, season_year: int, creds: dict[str, str]) -> Any:
         """
         Build and return a live API connection/session for this league.
         Implementations should stamp a `.season` attribute (and anything
@@ -25,35 +32,39 @@ class FtyHandler:
         """
         raise NotImplementedError
 
-    def get_league(self, con) -> pl.DataFrame:
-        raise NotImplementedError
- 
-    def get_league_categories(self, con) -> pl.DataFrame:
+    def get_league(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_free_agents(self, con) -> pl.DataFrame:
+    def get_league_categories(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_league_competitor(self, con) -> pl.DataFrame:
+    def get_free_agents(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_league_matchup(self, con) -> pl.DataFrame:
+    def get_league_competitor(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_competitor_roster(self, con) -> pl.DataFrame:
+    def get_league_matchup(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_recent_activity(self, con) -> pl.DataFrame:
+    def get_competitor_roster(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_matchup_box_score(self, con, matchup_period: int | None = None) -> pl.DataFrame:
+    def get_recent_activity(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_matchup_result(self, con, matchup_period: int | None = None) -> pl.DataFrame:
+    def get_matchup_box_score(
+        self, con: Any, matchup_period: int | None = None
+    ) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_league_byes(self, con) -> pl.DataFrame:
+    def get_matchup_result(
+        self, con: Any, matchup_period: int | None = None
+    ) -> pl.DataFrame:
         raise NotImplementedError
 
-    def get_league_matchup_dates(self, con) -> pl.DataFrame:
+    def get_league_byes(self, con: Any) -> pl.DataFrame:
+        raise NotImplementedError
+
+    def get_league_matchup_dates(self, con: Any) -> pl.DataFrame:
         raise NotImplementedError

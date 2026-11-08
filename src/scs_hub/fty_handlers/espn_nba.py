@@ -1,7 +1,8 @@
-import json
 import datetime as dt
-import polars as pl
+import json
+
 import espn_api.basketball as bb
+import polars as pl
 from espn_api.basketball.constant import POSITION_MAP, STATS_MAP
 
 from scs_hub.fty_handlers.base import FtyHandler
@@ -12,7 +13,7 @@ from scs_hub.fty_handlers.base import FtyHandler
 RESULT_MAP = {
     "HOME": {"home": "W", "away": "L"},
     "AWAY": {"home": "L", "away": "W"},
-    "TIE":  {"home": "T", "away": "T"},
+    "TIE": {"home": "T", "away": "T"},
 }
 
 # ESPN's lineupSlotCounts is keyed by slot id. Slots 0-11 are the starting
@@ -37,7 +38,9 @@ _RECENT_ACTIVITY_SCHEMA = {
 class EspnNbaHandler(FtyHandler):
     NAME = "ESPN"
 
-    def connect(self, league_id, season_year, creds):
+    def connect(
+        self, league_id: int, season_year: int, creds: dict[str, str]
+    ) -> bb.League:
 
         con = bb.League(
             league_id=int(league_id),
@@ -48,7 +51,7 @@ class EspnNbaHandler(FtyHandler):
         con.season = f"{season_year}-{str(season_year + 1)[-2:]}"
         return con
 
-    def get_league(self, con) -> pl.DataFrame:
+    def get_league(self, con: bb.League) -> pl.DataFrame:
         # BaseSettings doesn't parse `isPublic` out of ESPN's raw response
         # (only scoring/schedule/trade settings get extracted), so it's
         # pulled directly from the raw league JSON instead of con.settings.
@@ -78,7 +81,7 @@ class EspnNbaHandler(FtyHandler):
             ]
         )
 
-    def get_league_categories(self, con) -> pl.DataFrame:
+    def get_league_categories(self, con: bb.League) -> pl.DataFrame:
         # `points` is only meaningful for points-format leagues (scoring_type
         # "H2H_POINTS") — for category leagues (H2H_CATEGORY, ROTOTOTAL) this
         # is forced to None explicitly below, rather than relying on ESPN's
@@ -97,12 +100,14 @@ class EspnNbaHandler(FtyHandler):
                     "platform": self.NAME,
                     "league_id": con.league_id,
                     "category": STATS_MAP.get(stat_id, f"unknown({stat_id})"),
-                    "points": item.get("points") if con.settings.scoring_type == "H2H_POINTS" else None,
+                    "points": item.get("points")
+                    if con.settings.scoring_type == "H2H_POINTS"
+                    else None,
                 }
             )
         return pl.DataFrame(dfs, schema_overrides={"points": pl.Float64})
 
-    def get_free_agents(self, con) -> pl.DataFrame:
+    def get_free_agents(self, con: bb.League) -> pl.DataFrame:
         dfs = []
         for free_agent in con.free_agents(size=1000):
             dfs.append(
@@ -110,10 +115,12 @@ class EspnNbaHandler(FtyHandler):
                     "season": con.season,
                     "platform": self.NAME,
                     "league_id": con.league_id,
-                    "timestamp": dt.datetime.now(dt.timezone.utc),
+                    "timestamp": dt.datetime.now(dt.UTC),
                     "player_id": free_agent.playerId,
                     "player_name": free_agent.name,
-                    "player_team": free_agent.proTeam.replace("PHL", "PHI").replace("PHO", "PHX"),
+                    "player_team": free_agent.proTeam.replace("PHL", "PHI").replace(
+                        "PHO", "PHX"
+                    ),
                     "player_injury_status": None
                     if len(free_agent.injuryStatus) == 0
                     else free_agent.injuryStatus,
@@ -122,7 +129,7 @@ class EspnNbaHandler(FtyHandler):
             )
         return pl.DataFrame(dfs)
 
-    def get_league_competitor(self, con) -> pl.DataFrame:
+    def get_league_competitor(self, con: bb.League) -> pl.DataFrame:
         # ESPN always reports at least one division, even when the league has no
         # real split: the single entry is a default standings group (often named
         # "A team", "League Standings" or similar) covering every team. A league
@@ -150,7 +157,7 @@ class EspnNbaHandler(FtyHandler):
             )
         return pl.DataFrame(dfs)
 
-    def get_league_matchup(self, con) -> pl.DataFrame:
+    def get_league_matchup(self, con: bb.League) -> pl.DataFrame:
         """
         One row per competitor per period they have an opponent, with the period
         taken from ESPN's own matchupPeriodId.
@@ -208,7 +215,7 @@ class EspnNbaHandler(FtyHandler):
             },
         ).sort("matchup_period", "competitor_id")
 
-    def get_competitor_roster(self, con) -> pl.DataFrame:
+    def get_competitor_roster(self, con: bb.League) -> pl.DataFrame:
         dfs = []
         for competitor in con.teams:
             for player in competitor.roster:
@@ -217,12 +224,14 @@ class EspnNbaHandler(FtyHandler):
                         "season": con.season,
                         "platform": self.NAME,
                         "league_id": con.league_id,
-                        "timestamp": dt.datetime.now(dt.timezone.utc),
+                        "timestamp": dt.datetime.now(dt.UTC),
                         "matchup_period": con.currentMatchupPeriod,
                         "competitor_id": competitor.team_id,
                         "player_fantasy_id": player.playerId,
                         "player_name": player.name,
-                        "player_team": player.proTeam.replace("PHL", "PHI").replace("PHO", "PHX"),
+                        "player_team": player.proTeam.replace("PHL", "PHI").replace(
+                            "PHO", "PHX"
+                        ),
                         "player_injury_status": player.injuryStatus,
                         "player_acquisition_type": player.acquisitionType,
                         "lineup_slot": player.lineupSlot,
@@ -230,7 +239,7 @@ class EspnNbaHandler(FtyHandler):
                 )
         return pl.DataFrame(dfs)
 
-    def get_recent_activity(self, con) -> pl.DataFrame:
+    def get_recent_activity(self, con: bb.League) -> pl.DataFrame:
         dfs = []
         for activity in con.recent_activity(size=50):
             for action in activity.actions:
@@ -240,7 +249,7 @@ class EspnNbaHandler(FtyHandler):
                         "platform": self.NAME,
                         "league_id": con.league_id,
                         "timestamp": dt.datetime.fromtimestamp(
-                            activity.date / 1000, tz=dt.timezone.utc
+                            activity.date / 1000, tz=dt.UTC
                         ),
                         "competitor_id": action[0].team_id,
                         "action": action[1],
@@ -277,7 +286,7 @@ class EspnNbaHandler(FtyHandler):
         )
         return dict(zip(rows["platform_category"], rows["nba_category"]))
 
-    def _raw_matchup_rosters(self, con, matchup_period: int) -> dict:
+    def _raw_matchup_rosters(self, con: bb.League, matchup_period: int) -> dict:
         """
         {team_id: [per-player raw stat dict]} for a matchup period, read from
         ESPN's own response rather than through BoxPlayer.
@@ -295,13 +304,22 @@ class EspnNbaHandler(FtyHandler):
         projected) is read.
         """
         scoring_period = (
-            con.matchup_ids[matchup_period][-1] if matchup_period in con.matchup_ids else 1
+            con.matchup_ids[matchup_period][-1]
+            if matchup_period in con.matchup_ids
+            else 1
         )
         data = con.espn_request.league_get(
-            params={"view": ["mMatchupScore", "mScoreboard"], "scoringPeriodId": scoring_period},
+            params={
+                "view": ["mMatchupScore", "mScoreboard"],
+                "scoringPeriodId": scoring_period,
+            },
             headers={
                 "x-fantasy-filter": json.dumps(
-                    {"schedule": {"filterMatchupPeriodIds": {"value": [matchup_period]}}}
+                    {
+                        "schedule": {
+                            "filterMatchupPeriodIds": {"value": [matchup_period]}
+                        }
+                    }
                 )
             },
         )
@@ -357,7 +375,9 @@ class EspnNbaHandler(FtyHandler):
                     totals[stored[label]] = totals.get(stored[label], 0) + value
         return totals
 
-    def get_matchup_box_score(self, con, matchup_period: int | None = None) -> pl.DataFrame:
+    def get_matchup_box_score(
+        self, con: bb.League, matchup_period: int | None = None
+    ) -> pl.DataFrame:
         """
         One row per (competitor, category) for the current matchup period.
 
@@ -381,7 +401,7 @@ class EspnNbaHandler(FtyHandler):
         for box_score in box_scores:
             for side in ("home", "away"):
                 competitor = getattr(box_score, side + "_team")
-                if competitor == 0:          # bye: no competitor this period
+                if competitor == 0:  # bye: no competitor this period
                     continue
 
                 if hasattr(box_score, side + "_stats"):
@@ -389,7 +409,7 @@ class EspnNbaHandler(FtyHandler):
                         getattr(box_score, side + "_stats"), stored
                     )
                 else:
-                    if rosters is None:      # one extra request per league, not per team
+                    if rosters is None:  # one extra request per league, not per team
                         rosters = self._raw_matchup_rosters(con, matchup_period)
                     totals = self._totals_from_players(
                         rosters.get(competitor.team_id, []), stored
@@ -421,7 +441,9 @@ class EspnNbaHandler(FtyHandler):
             },
         )
 
-    def get_matchup_result(self, con, matchup_period: int | None = None) -> pl.DataFrame:
+    def get_matchup_result(
+        self, con: bb.League, matchup_period: int | None = None
+    ) -> pl.DataFrame:
         """
         One row per competitor per matchup: the outcome as ESPN reports it,
         not recomputed here.
@@ -445,20 +467,23 @@ class EspnNbaHandler(FtyHandler):
                     continue
                 opponent = getattr(box_score, other + "_team")
 
-                if hasattr(box_score, side + "_wins"):       # category league
+                if hasattr(box_score, side + "_wins"):  # category league
                     won = getattr(box_score, side + "_wins")
                     lost = getattr(box_score, side + "_losses")
                     tied = getattr(box_score, side + "_ties")
                     score = won + tied / 2
                     opponent_score = (
-                        None if opponent == 0
+                        None
+                        if opponent == 0
                         else getattr(box_score, other + "_wins")
                         + getattr(box_score, other + "_ties") / 2
                     )
-                else:                                        # points league
+                else:  # points league
                     won = lost = tied = None
                     score = getattr(box_score, side + "_score")
-                    opponent_score = None if opponent == 0 else getattr(box_score, other + "_score")
+                    opponent_score = (
+                        None if opponent == 0 else getattr(box_score, other + "_score")
+                    )
 
                 dfs.append(
                     {
@@ -469,7 +494,9 @@ class EspnNbaHandler(FtyHandler):
                         "competitor_id": competitor.team_id,
                         "opponent_id": None if opponent == 0 else opponent.team_id,
                         "score": float(score),
-                        "opponent_score": None if opponent_score is None else float(opponent_score),
+                        "opponent_score": None
+                        if opponent_score is None
+                        else float(opponent_score),
                         "cat_won": won,
                         "cat_lost": lost,
                         "cat_tied": tied,
@@ -495,7 +522,7 @@ class EspnNbaHandler(FtyHandler):
             },
         )
 
-    def get_league_matchup_dates(self, con) -> pl.DataFrame:
+    def get_league_matchup_dates(self, con: bb.League) -> pl.DataFrame:
         """
         Start and end dates for every matchup period, derived rather than entered.
 
@@ -529,7 +556,9 @@ class EspnNbaHandler(FtyHandler):
             "SELECT season_type, begin_date FROM nba.key_dates "
             f"WHERE season = '{con.season}'"
         )
-        dates = {r["season_type"]: r["begin_date"] for r in key_dates.iter_rows(named=True)}
+        dates = {
+            r["season_type"]: r["begin_date"] for r in key_dates.iter_rows(named=True)
+        }
 
         if "Regular Season" not in dates:
             # Without an opener there is no grid to build. Raising beats writing
@@ -576,7 +605,7 @@ class EspnNbaHandler(FtyHandler):
             },
         )
 
-    def get_league_byes(self, con) -> pl.DataFrame:
+    def get_league_byes(self, con: bb.League) -> pl.DataFrame:
         """
         Periods where a competitor has no opponent, taken from ESPN's own
         matchupPeriodId.

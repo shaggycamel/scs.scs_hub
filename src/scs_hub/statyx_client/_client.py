@@ -1,28 +1,37 @@
 import asyncio
+from types import TracebackType
+from typing import Self
+
 import aiohttp
 
 
 class StatyxClient:
     """Thin transport layer: pagination + concurrency. No knowledge of specific endpoints."""
 
-    def __init__(self, api_key: str, max_concurrent: int = 5, max_retries: int = 4):
+    def __init__(
+        self, api_key: str, max_concurrent: int = 5, max_retries: int = 4
+    ) -> None:
         self.api_key = api_key
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
         self.session: aiohttp.ClientSession | None = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         connector = aiohttp.TCPConnector(limit=self.max_concurrent)
         self.session = aiohttp.ClientSession(
-            connector=connector,
-            headers={"x-api-key": self.api_key}
+            connector=connector, headers={"x-api-key": self.api_key}
         )
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         await self.session.close()
 
-    async def _get(self, url: str, params: dict):
+    async def _get(self, url: str, params: dict) -> list | dict:
         """
         One GET, retrying on 429. Keyed endpoints fan out a request per player,
         which overruns the account's rate limit (800 per window) long before the
@@ -33,7 +42,7 @@ class StatyxClient:
         for attempt in range(self.max_retries + 1):
             async with self.session.get(url, params=params) as r:
                 if r.status == 429 and attempt < self.max_retries:
-                    await asyncio.sleep(float(r.headers.get("Retry-After", 2 ** attempt)))
+                    await asyncio.sleep(float(r.headers.get("Retry-After", 2**attempt)))
                     continue
                 r.raise_for_status()
                 return (await r.json())["data"]
@@ -62,7 +71,9 @@ class StatyxClient:
         """
         fetch = self.get_paginated if paginated else self.get_one
 
-        async def fetch_one(key, url, params):
+        async def fetch_one(
+            key: object, url: str, params: dict
+        ) -> tuple[object, list | dict | None, str | None]:
             try:
                 result = await fetch(url, params)
                 return key, result, None
