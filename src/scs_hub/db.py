@@ -1,9 +1,10 @@
-import logging
 import configparser
+import logging
 import re
-import sqlalchemy
-import polars as pl
 from collections import defaultdict
+
+import polars as pl
+import sqlalchemy
 
 from scs_hub.config import credentials_path, ensure_credentials_file
 
@@ -164,21 +165,20 @@ class Database:
         schemas: tuple[str, ...] = READ_SCHEMAS,
     ) -> list[str]:
         """
-        Re-grant SELECT to one or more read-only roles on every table and view in
-        the data schemas. role is a name or a list/tuple of names, granted in a
-        single statement (GRANT ... TO a, b).
+        Re-grant SELECT to one or more read-only roles on every view in the data
+        schemas. role is a name or a list/tuple of names, granted in a single
+        statement (GRANT ... TO a, b).
 
-        Dropping and recreating a view or table discards the grants attached to
-        it, so a role such as kobe_public (the Cockroach read-only user) loses
-        access to exactly the objects that were rebuilt. This sweeps the schemas
-        and grants SELECT again; it is idempotent, so it is safe to run after any
+        Dropping and recreating a view discards the grants attached to it, so a
+        role such as kobe_public (the Cockroach read-only user) loses access to
+        exactly the views that were rebuilt. This sweeps the schemas and grants
+        SELECT again; it is idempotent, so it is safe to run after any view
         rebuild.
 
-        Base tables and views are both enumerated from information_schema.tables
-        rather than trusting GRANT ... ON ALL TABLES IN SCHEMA, which Cockroach's
-        docs describe as covering tables and sequences and do not promise views.
-        Schemas absent from this connection (e.g. Cockroach has no fty) are
-        skipped and logged. Returns the schemas that were granted.
+        Only views are granted. Base tables stay private to the owning role;
+        public consumers read the view layer. Schemas absent from this connection
+        (e.g. Cockroach has no fty) are skipped and logged. Returns the schemas
+        that were granted.
         """
         roles = (role,) if isinstance(role, str) else tuple(role)
         if not roles:
@@ -189,7 +189,7 @@ class Database:
         role_list = ", ".join(roles)
 
         objects = self.read(
-            "SELECT table_schema, table_name FROM information_schema.tables "
+            "SELECT table_schema, table_name FROM information_schema.views "
             f"WHERE table_schema IN ({', '.join(repr(s) for s in schemas)}) "
             "ORDER BY table_schema, table_name"
         )
@@ -202,7 +202,7 @@ class Database:
         for schema in schemas:
             names = by_schema.get(schema)
             if not names:
-                logger.warning("regrant_read: no tables/views in %s — skipped", schema)
+                logger.warning("regrant_read: no views in %s — skipped", schema)
                 continue
             targets = ", ".join(f'"{schema}"."{name}"' for name in names)
             self.execute(f"GRANT SELECT ON TABLE {targets} TO {role_list}")
