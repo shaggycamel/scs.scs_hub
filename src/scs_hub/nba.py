@@ -756,9 +756,10 @@ class NBAComponent:
                     pl.col("num").str.replace("", None),
                     pl.lit(self.ctx.cur_season).alias("season"),
                     pl.lit(None).cast(pl.Float64).alias("salary"),
-                    pl.lit(None if pre_season else self.ctx.date_est)
-                    .cast(pl.Date)
-                    .alias("entry_date"),
+                    # Null entry means the player was already on the roster at
+                    # the start of the observed season; it is not a missing
+                    # value. Midseason arrivals are stamped below.
+                    pl.lit(None).cast(pl.Date).alias("entry_date"),
                     pl.lit(None).cast(pl.Date).alias("exit_date"),
                 ]
             )
@@ -773,65 +774,68 @@ class NBAComponent:
         df = self.db.conform(df, "team_roster", "nba")
 
         if pre_season:
+            # Opening-night snapshot: everyone is already on the roster and the
+            # real join date is unknowable. Replace the season rather than
+            # appending a second copy if this is run twice.
+            self.db.delete_where("team_roster", "nba", f"season = '{self.ctx.cur_season}'")
             self.db.write_ordered(df, "team_roster", schema="nba")
+            return
+
+        df_existing = self.db.read(
+            f"SELECT * FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND exit_date IS NULL",
+            schema_overrides={
+                "team_id": pl.Int64,
+                "player_id": pl.Int64,
+                "entry_date": pl.Date,
+                "exit_date": pl.Date,
+            },
+        )
+
+        if df_existing.is_empty():
+            # First in-season snapshot: same null-entry semantics as pre-season.
+            self.db.write_ordered(df, "team_roster", schema="nba")
+            return
+
+        key = ["season", "team_id", "player_id"]
+        arrivals = df.join(df_existing.select(key), on=key, how="anti")
+        departures = df_existing.join(df.select(key), on=key, how="anti")
+
+        if departures.height:
+            pairs = ", ".join(
+                f"({r['team_id']}, {r['player_id']})"
+                for r in departures.iter_rows(named=True)
+            )
+            self.db.delete_where(
+                "team_roster",
+                "nba",
+                f"season = '{self.ctx.cur_season}' AND exit_date IS NULL "
+                f"AND (team_id, player_id) IN ({pairs})",
+            )
+            self.db.write_ordered(
+                departures.with_columns(
+                    pl.lit(self.ctx.date_est).cast(pl.Date).alias("exit_date")
+                ),
+                "team_roster",
+                schema="nba",
+            )
+
+        if arrivals.height:
+            self.db.write_ordered(
+                arrivals.with_columns(
+                    pl.lit(self.ctx.date_est).cast(pl.Date).alias("entry_date")
+                ),
+                "team_roster",
+                schema="nba",
+            )
+
+        if not arrivals.height and not departures.height:
+            logger.info("nba.team_roster: nothing to update")
         else:
-            df_existing = self.db.read(
-                f"SELECT * FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND exit_date IS NULL",
-                schema_overrides={
-                    "team_id": pl.Int64,
-                    "player_id": pl.Int64,
-                    "entry_date": pl.Date,
-                    "exit_date": pl.Date,
-                },
-            ).with_columns(
-                pl.when(pl.col("exit_date").is_null())
-                .then(pl.lit(self.ctx.date_est))
-                .otherwise(pl.col("exit_date"))
-                .alias("exit_date")
+            logger.info(
+                "nba.team_roster: %d arrival(s), %d departure(s)",
+                arrivals.height,
+                departures.height,
             )
-
-            if df_existing.is_empty():
-                # No snapshot stored for the season yet — the very first
-                # non-preseason run, or a season the table has never seen.
-                # There are no trades to diff against, so persist this snapshot;
-                # concat below would otherwise join against a 0-row frame whose
-                # inferred Null dtypes cannot match the new frame's String season.
-                self.db.write_ordered(df, "team_roster", schema="nba")
-                return
-
-            df_traded = (
-                pl.concat([df, df_existing])
-                .join(
-                    (
-                        df.join(
-                            df_existing,
-                            on=["season", "team_id", "player_id"],
-                            how="anti",
-                        ).select("player_id")
-                    ),
-                    on="player_id",
-                    how="inner",
-                )
-                .with_columns(
-                    pl.col("salary").backward_fill().forward_fill().over("player_id")
-                )
-            )
-
-            if len(df_traded) > 0:
-                del_ids = df_traded.unique("player_id")["player_id"].to_list()
-                del_ids = ", ".join(map(str, del_ids))
-
-                self.db.execute(
-                    f"DELETE FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND player_id IN ({del_ids}) AND exit_date IS NULL",
-                )
-
-                self.db.write(df_traded, "team_roster", schema="nba")
-                logger.info(
-                    "nba.team_roster traded players have been updated (%d rows)",
-                    len(df_traded),
-                )
-            else:
-                logger.info("nba.team_roster: nothing to update")
 
     def get_play_by_play(self) -> None:
         """
