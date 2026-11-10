@@ -28,7 +28,7 @@ Observed on `cockroach-write` after the season started.
 - **Fix** — source the full season from `ScheduleLeagueV2` and write it only
   when the frame is non-empty; select scheduled games missing from the box-score
   base tables instead of using the max view date; rerun injuries against the
-  restored schedule. `nba.schedule_vw` is back on `nba.league_game_schedule`.
+  restored schedule. `nba.league_game_schedule_vw` is back on `nba.league_game_schedule`.
 
 ## 2026-10-13 — `fty.get_recent_activity`: `ColumnNotFoundError` for a league with no activity
 
