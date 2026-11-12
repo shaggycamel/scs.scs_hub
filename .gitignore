@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# macOS metadata
+.DS_Store
+
 # Credentials file
 credentials.ini
 

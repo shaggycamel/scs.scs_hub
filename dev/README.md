@@ -1,5 +1,8 @@
 # fty_dev — points leagues in the fantasy tables
 
+> Working notes: current runbooks and historical migration records. Start with
+> the package [README](../README.md).
+
 Working area for extending the `fty` schema beyond category leagues. All of it
 targets **`fty_dev`** on Postgres; `fty` is read as a source and never written to.
 
