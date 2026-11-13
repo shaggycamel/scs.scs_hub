@@ -364,8 +364,8 @@ per-category matchup breakdown in either league format.
 # Player identity (util.player / util.player_source_id)
 
 Replaces the wide, name-keyed `util.conformed_player_id`. **Built and verified
-against local Postgres; the old table is left in place untouched** so the five
-un-ported dashboard views keep working until they are refabricated.
+against local Postgres; the old table was dropped on 2026-11-13** once no view
+or app read it.
 
 ## Why
 
@@ -733,10 +733,9 @@ merges are not yet applied.
   that logs and skips a platform whose directory comes back empty.
 - **`nba.team_roster.player_id` is `double precision`**, cast to bigint in the
   directory view. Worth fixing at source.
-- **`util.conformed_player_id` has been renamed `conformed_player_id_RETIRED`**
-  (quoted, since Postgres folds unquoted identifiers to lower case). The seed
-  that read it has been removed; only the five un-ported dashboard views still
-  read it, so it cannot be dropped until they are refabricated.
+- **`util.conformed_player_id` has been dropped.** It was renamed
+  `conformed_player_id_RETIRED` on Postgres; both copies were removed on
+  2026-11-13 once no view or app read it.
 
   `player_source_id` is a strict superset: of the retired table's 2871 unpivoted
   ids, **0 are absent** from the live table, which holds 5070. Dropping it costs
