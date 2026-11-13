@@ -80,11 +80,13 @@ class StatyxComponent:
             .with_columns(
                 cs.by_dtype(pl.Datetime("us", "UTC")).dt.replace_time_zone(None)
             )
+            .unique()
         )
 
         # Schedule rows mutate as the season runs — scores land, games move — so
         # the season is replaced wholesale. Deleting by game_id would drop rows:
-        # the source repeats a couple of ids per season (1320 rows, 1318 ids).
+        # the source repeats a couple of ids per season (1320 rows, 1318 ids), so
+        # drop exact duplicate rows before the keyed write.
         self.db.delete_where("schedule", "statyx", f"season = '{season}'")
 
         self.db.write_ordered(df, "schedule", schema="statyx")
