@@ -610,7 +610,7 @@ ONE-TIME / DEPLOY — not part of the daily loop
 ════════════════════════════════════════════════════════════
  ✅ audit pass (review_player_identities(origin="audit"))
  ✅ hand corrections applied; postgres and cockroach aligned at 2725 / 5070
- ✅ util.player_identity_review + util.player_identity_check on both DBs
+ ✅ util.player_identity_review on both DBs; integrity checks run in Python
  ✋ once, all infra: push scs-hub, bump scs.nba.database's uv.lock and
     rebuild the image, and set the cockroach sections' dialect=cockroachdb
     on the NUC. Until then the runner logs a warning and skips (2)/(3).
@@ -939,11 +939,9 @@ data regardless of the season asked for. No corruption:
   table for model-proposed corrections. Idempotent (`IF NOT EXISTS`)
 - `seed_player_identity_review.sql` — the hand-audited corrections, re-runnable
   (`ON CONFLICT DO NOTHING`); reapply after a rebuild
-- `build_player_identity_check.sql` — `util.player_identity_check`, the two
-  DB-native integrity checks as a view (`SELECT * ... WHERE failures > 0` should
-  return no rows). The third, `colliding_names`, is in Python:
-  `UtilComponent.check_player_identity()`
-- `player_identity_ops.sql` — manual recipes for operating the identity tables
+- `player_identity_ops.sql` — manual recipes for operating the identity tables,
+  including the two portable integrity checks. The third, `colliding_names`, is
+  in Python: `UtilComponent.check_player_identity()`
 - `one-grain-two-formats.html` — source for the design diagram
 - `superseded/` — earlier drafts, kept for history. **Do not run them:** both
   target `fty` rather than `fty_dev`, and predate the pct, `is_scored` and

@@ -10,11 +10,17 @@ FROM util.unmatched_player_source_vw
 GROUP BY 1 ORDER BY 1;
 
 -- 2. INTEGRITY CHECKS — every check must report 0 failures. Worth running after
--- any resolve, apply or manual edit. In Python (hub.util.check_player_identity())
--- for all three; this view (dev/build_player_identity_check.sql) carries the two
--- a portable query can compute.
-SELECT * FROM util.player_identity_check WHERE failures > 0;   -- want no rows
--- hub.util.check_player_identity()   # same, plus colliding_names (NFKD fold)
+-- any resolve, apply or manual edit. This SQL covers the two portable checks;
+-- hub.util.check_player_identity() adds colliding_names (NFKD fold).
+SELECT 'players_owning_nothing' AS check_name, count(*) AS failures
+FROM util.player p
+WHERE NOT EXISTS (
+    SELECT 1 FROM util.player_source_id m WHERE m.player_key = p.player_key
+)
+UNION ALL
+SELECT 'backlog', count(*)
+FROM util.unmatched_player_source_vw;
+-- hub.util.check_player_identity()   # all three, including colliding_names
 
 -- 3. WHAT DID THE MATCHER INVENT? Review queue. Most are legitimate — the box
 -- scores reach back to 2009-10 and statyx carries college prospects — so this is

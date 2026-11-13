@@ -283,9 +283,8 @@ class UtilComponent:
             check_player_identity().filter(pl.col("failures") > 0)   # want no rows
 
         colliding_names folds names through norm_name(), which SQL cannot do
-        portably (no user-defined function on Cockroach), so this replaces the
-        util.norm_name half of the old util.player_identity_check view; that view
-        keeps the two DB-native checks.
+        portably (no user-defined function on Cockroach). The two portable
+        checks are also kept in dev/player_identity_ops.sql.
         """
         db = self.db
         orphans = db.read(
