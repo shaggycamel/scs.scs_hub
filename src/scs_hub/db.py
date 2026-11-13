@@ -182,10 +182,9 @@ class Database:
                 f'GRANT {privilege} ON TABLE "{schema}"."{table_name}" TO "{grantee}"'
             )
 
-        for grantee, schema in sorted(
-            {(grantee, schema) for grantee, schema, _, _ in rows.iter_rows()}
-        ):
-            self.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{grantee}"')
+        for grantee in sorted({grantee for grantee, _, _, _ in rows.iter_rows()}):
+            for schema in READ_SCHEMAS:
+                self.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{grantee}"')
 
         logger.info("apply_sql_grant: applied %d grant(s)", len(rows))
 
