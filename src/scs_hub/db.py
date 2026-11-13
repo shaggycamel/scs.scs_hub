@@ -1,7 +1,6 @@
 import configparser
 import logging
 import re
-from collections import defaultdict
 from typing import Any
 
 import polars as pl
@@ -167,64 +166,28 @@ class Database:
             conn.execute(sqlalchemy.sql.text(statement))
             conn.commit()
 
-    def regrant_read(
-        self,
-        role: str | list[str] | tuple[str, ...] = "kobe_public",
-        schemas: tuple[str, ...] = READ_SCHEMAS,
-    ) -> list[str]:
+    def apply_sql_grant(self) -> None:
         """
-        Re-grant SELECT to one or more read-only roles on every view in the data
-        schemas. role is a name or a list/tuple of names, granted in a single
-        statement (GRANT ... TO a, b).
-
-        Dropping and recreating a view discards the grants attached to it, so a
-        role such as kobe_public (the Cockroach read-only user) loses access to
-        exactly the views that were rebuilt. This sweeps the schemas and grants
-        SELECT again; it is idempotent, so it is safe to run after any view
-        rebuild.
-
-        Only views are granted. Base tables stay private to the owning role;
-        public consumers read the view layer. Schemas absent from this connection
-        (e.g. Cockroach has no fty) are skipped and logged. Returns the schemas
-        that were granted.
+        Apply util.sql_grant: grant each row's privilege on its object to its
+        grantee. Idempotent; a stale row or missing object fails at the GRANT.
         """
-        roles = (role,) if isinstance(role, str) else tuple(role)
-        if not roles:
-            raise ValueError(
-                "regrant_read: role must be a name or a non-empty list/tuple"
-            )
-        for ident in (*roles, *schemas):
-            if not _IDENT.match(ident):
-                raise ValueError(f"regrant_read: unsafe identifier {ident!r}")
-        role_list = ", ".join(roles)
-
-        objects = self.read(
-            "SELECT table_schema, table_name FROM information_schema.views "
-            f"WHERE table_schema IN ({', '.join(repr(s) for s in schemas)}) "
-            "ORDER BY table_schema, table_name"
+        rows = self.read(
+            'SELECT grantee, "schema", table_name, privilege FROM util.sql_grant'
         )
-
-        by_schema: dict[str, list[str]] = defaultdict(list)
-        for r in objects.iter_rows(named=True):
-            by_schema[r["table_schema"]].append(r["table_name"])
-
-        granted = []
-        for schema in schemas:
-            names = by_schema.get(schema)
-            if not names:
-                logger.warning("regrant_read: no views in %s — skipped", schema)
-                continue
-            targets = ", ".join(f'"{schema}"."{name}"' for name in names)
-            self.execute(f"GRANT SELECT ON TABLE {targets} TO {role_list}")
-            granted.append(schema)
-            logger.info(
-                "regrant_read: SELECT on %d object(s) in %s granted to %s",
-                len(names),
-                schema,
-                role_list,
+        for grantee, schema, table_name, privilege in rows.iter_rows():
+            for ident in (grantee, schema, table_name):
+                if not _IDENT.match(ident):
+                    raise ValueError(f"apply_sql_grant: unsafe identifier {ident!r}")
+            self.execute(
+                f'GRANT {privilege} ON TABLE "{schema}"."{table_name}" TO "{grantee}"'
             )
 
-        return granted
+        for grantee, schema in sorted(
+            {(grantee, schema) for grantee, schema, _, _ in rows.iter_rows()}
+        ):
+            self.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{grantee}"')
+
+        logger.info("apply_sql_grant: applied %d grant(s)", len(rows))
 
     def deduplicate_tables(self, season: str, dry_run: bool = False) -> list[str]:
         """
@@ -331,7 +294,7 @@ class Database:
         their target copy may carry review work the source has never seen.
 
         Each table is delete-then-append (never DROP: a dropped table would take dependent
-        views with it, and views are apply_views.py's job, grants regrant_read's). delete
+        views with it, and views are apply_views.py's job, grants apply_sql_grant's). delete
         is scoped to exactly the rows read, so a failure between the read and the write
         leaves the target as it was for that table.
 
