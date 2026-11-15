@@ -24,6 +24,43 @@ def _fold_report_name(name: str) -> str:
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_game_ids(
+    df: pl.DataFrame, fixtures: pl.DataFrame, lookahead_days: int = 2
+) -> pl.DataFrame:
+    """Fill a null injury-report game_id from the team's next fixture.
+
+    The report is published before tip-off and is sometimes stored before the
+    fixture row it refers to, so joining on (game_date, matchup) leaves game_id
+    null on 18.6% of rows between 2021 and 2026. Those rows are matched to the
+    earliest fixture for the same team on or after the report date. A report
+    with no fixture inside the window keeps a null id: the game was never
+    played, usually a pre-season or end-of-season report.
+    """
+    pending = df.filter(pl.col("game_id").is_null()).select("game_date", "team_slug").unique()
+    if pending.is_empty():
+        return df
+
+    resolved = (
+        pending.join(fixtures, on="team_slug", how="inner", suffix="_fixture")
+        .filter(
+            (pl.col("game_date_fixture") >= pl.col("game_date"))
+            & (
+                pl.col("game_date_fixture")
+                <= pl.col("game_date") + dt.timedelta(days=lookahead_days)
+            )
+        )
+        .sort(["game_date", "team_slug", "game_date_fixture"])
+        .group_by(["game_date", "team_slug"], maintain_order=True)
+        .agg(pl.col("game_id").first().alias("resolved_game_id"))
+    )
+    return (
+        df.join(resolved, on=["game_date", "team_slug"], how="left")
+        .with_columns(pl.coalesce("game_id", "resolved_game_id").alias("game_id"))
+        .drop("resolved_game_id")
+    )
+
+
 # Only the season types this component stores. All-Star (003), the play-in
 # tournament (005) and the NBA Cup final (006) are intentionally out of scope.
 _SCHEDULE_SEASON_TYPES = {
@@ -223,6 +260,19 @@ class NBAComponent:
             },
         )
 
+        # Fallback for report rows the (date, matchup) join above misses. Keyed
+        # by team rather than matchup, and one day wider, because the report is
+        # sometimes filed before the fixture row it refers to is stored.
+        fixtures = self.db.read(
+            f"SELECT game_date, game_id, team AS team_slug FROM nba.league_game_schedule "
+            f"WHERE game_date BETWEEN '{dt_est}' AND '{dt_est + dt.timedelta(days=3)}'",
+            schema_overrides={
+                "game_date": pl.Date,
+                "game_id": pl.Int64,
+                "team_slug": pl.String,
+            },
+        )
+
         player_ids = (
             self.db.read(
                 "SELECT source_name AS nba_name, source_id AS nba_id "
@@ -315,6 +365,7 @@ class NBAComponent:
             .join(teams_true, how="left", on="team")
             .join(player_ids, how="left", on="_name_fold")
             .join(game_ids, how="left", on=["game_date", "matchup"])
+            .pipe(_resolve_game_ids, fixtures)
             .rename({"current_status": "status"})
             .drop("_name_fold", "nba_name")
             # The PDF parser occasionally emits the same row more than once;
@@ -326,10 +377,13 @@ class NBAComponent:
             game_date = row["game_date"]
             game_id = row["game_id"]
             player_name = row["player_name"].replace("'", "''")
-            # No scheduled game in the window (e.g. a pre-season report with no
-            # upcoming games stored yet): the left join leaves game_id null.
+            # A report the schedule never matched has no game_id, and a row that
+            # was stored that way has to be replaced rather than joined by id:
+            # 18.6% of reports (2021-2026) were written with a null game_id.
             game_predicate = (
-                "game_id IS NULL" if game_id is None else f"game_id = {game_id}"
+                "game_id IS NULL"
+                if game_id is None
+                else f"(game_id = {game_id} OR game_id IS NULL)"
             )
             self.db.execute(
                 f"DELETE FROM nba.injuries WHERE game_date = '{game_date}' AND {game_predicate} AND player_name = '{player_name}'",
