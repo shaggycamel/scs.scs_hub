@@ -5,6 +5,33 @@ gives the symptom, the code path, the cause, and the fix. `scs.nba.database`
 (`__main__.py`) records one `util.update_log` row per object, so a failure is the
 object's row with `success = false` plus the run exiting non-zero.
 
+## 2026-11-17 — `nba.team_roster`: partial fetch closed every open stint on a team
+
+Observed on `jetson-write` after the Nov 16 and Nov 17 daily runs.
+
+- **Symptom**
+
+  CLE, BOS, NOP and ATL players disappeared from the dashboard's future games.
+  `nba.team_roster` had zero open stints for those four teams; every player's
+  `exit_date` was the run date. `util.update_log` showed
+  `nba.get_team_roster` writing 17 rows on Nov 16 and 54 on Nov 17, against 0-2
+  on a normal day.
+
+- **Where** — `NBAComponent.get_team_roster`, `src/scs_hub/nba.py`.
+
+- **Cause** — `CommonTeamRoster` intermittently fails for individual teams. The
+  loop caught the failure and skipped the team, but the departure diff still
+  compared every open stored stint against the successful teams' frame. A
+  failed team's players were therefore absent from the new frame, so all of its
+  open stints were closed on the run date.
+
+- **Fix** — restrict the stored-roster diff to teams that answered, treat an
+  empty roster response as a failure, and raise after processing the successful
+  teams so the runner records the partial failure instead of a successful 54-row
+  write. `nba.get_team_roster` now leaves a failed team's open stints untouched.
+  The stints already closed were reopened from the current NBA roster with
+  `scs.nba.database/scripts/repair_roster_stints.py`.
+
 ## 2026-10-23 — `nba.league_game_schedule`: failed CDN fetch wiped the 2026-27 regular season
 
 Observed on `cockroach-write` after the season started.
