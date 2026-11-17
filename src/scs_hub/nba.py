@@ -774,16 +774,23 @@ class NBAComponent:
         logger.info("nba.team_roster")
         dfs = []
         failed = []
+        fetched = []
         for ix, team in enumerate(teams):
             # stats.nba.com intermittently answers CommonTeamRoster with an empty
-            # body, which nba_api surfaces as a JSONDecodeError. Unguarded, one
-            # such team aborts the loop and loses every roster in the run, so a
-            # bad team is skipped and named rather than ending the fetch.
+            # body, which nba_api surfaces as a JSONDecodeError. A bad team is
+            # skipped and named rather than ending the fetch, but it must also
+            # be excluded from the stored-roster diff below: its players are
+            # absent from this run's frame, and treating them as departures
+            # would close every open stint on that team.
             try:
                 common_teamroster = nba_ep.commonteamroster.CommonTeamRoster(
                     season=self.ctx.cur_season_year, team_id=team
                 )
-                dfs.append(pl.from_pandas(common_teamroster.get_data_frames()[0]))
+                raw = common_teamroster.get_data_frames()[0]
+                if raw is None or len(raw) == 0:
+                    raise ValueError("empty roster")
+                dfs.append(pl.from_pandas(raw))
+                fetched.append(team)
             except Exception:
                 logger.exception("team_id %s failed", team)
                 failed.append(team)
@@ -793,11 +800,11 @@ class NBAComponent:
         logger.debug("team: %d / %d", len(teams), len(teams))
 
         if failed:
-            logger.warning("team_roster: %d team(s) failed: %s", len(failed), failed)
+            logger.error("team_roster: %d team(s) failed: %s", len(failed), failed)
 
         if not dfs:
             logger.error("team_roster: nothing fetched, skipping write")
-            return
+            raise RuntimeError("team_roster: no teams fetched")
 
         df = (
             # diagonal_relaxed for the same reason as get_player_info: the
@@ -827,16 +834,36 @@ class NBAComponent:
         # ShapeError before any write is reached.
         df = self.db.conform(df, "team_roster", "nba")
 
+        def raise_failed() -> None:
+            if not failed:
+                return
+            failed_slugs = (
+                self.ctx.nba_teams.filter(pl.col("id").is_in(failed))
+                .get_column("abbreviation")
+                .to_list()
+            )
+            raise RuntimeError(
+                f"team_roster: {len(failed)} team(s) failed and were left "
+                f"untouched: {failed_slugs or failed}"
+            )
+
         if pre_season:
             # Opening-night snapshot: everyone is already on the roster and the
             # real join date is unknowable. Replace the season rather than
-            # appending a second copy if this is run twice.
-            self.db.delete_where("team_roster", "nba", f"season = '{self.ctx.cur_season}'")
+            # appending a second copy if this is run twice. A partial fetch must
+            # not replace the stored season with the teams that happened to
+            # answer.
+            raise_failed()
+            self.db.delete_where(
+                "team_roster", "nba", f"season = '{self.ctx.cur_season}'"
+            )
             self.db.write_ordered(df, "team_roster", schema="nba")
             return
 
+        fetched_ids = ", ".join(str(t) for t in fetched)
         df_existing = self.db.read(
-            f"SELECT * FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' AND exit_date IS NULL",
+            f"SELECT * FROM nba.team_roster WHERE season = '{self.ctx.cur_season}' "
+            f"AND exit_date IS NULL AND team_id IN ({fetched_ids})",
             schema_overrides={
                 "team_id": pl.Int64,
                 "player_id": pl.Int64,
@@ -848,6 +875,7 @@ class NBAComponent:
         if df_existing.is_empty():
             # First in-season snapshot: same null-entry semantics as pre-season.
             self.db.write_ordered(df, "team_roster", schema="nba")
+            raise_failed()
             return
 
         key = ["season", "team_id", "player_id"]
@@ -890,6 +918,8 @@ class NBAComponent:
                 arrivals.height,
                 departures.height,
             )
+
+        raise_failed()
 
     def get_play_by_play(self) -> None:
         """
