@@ -5,6 +5,33 @@ gives the symptom, the code path, the cause, and the fix. `scs.nba.database`
 (`__main__.py`) records one `util.update_log` row per object, so a failure is the
 object's row with `success = false` plus the run exiting non-zero.
 
+## 2026-11-19 — `nba.team_roster`: read timeouts failed the daily run
+
+Observed on `jetson-write` after the Nov 19 daily run (`job_kickoff`
+`2026-11-19T13:00:01Z`).
+
+- **Symptom**
+
+  ```
+  RuntimeError: team_roster: 2 team(s) failed and were left untouched: ['ATL', 'BOS']
+  ```
+
+  `nba.get_team_roster` logged `success = false` and the run exited 1, although
+  28 teams had answered and their arrivals/departures were written.
+
+- **Where** — `NBAComponent.get_team_roster`, `src/scs_hub/nba.py`.
+
+- **Cause** — `stats.nba.com` read-timed-out after 30s for team 1610612737 (ATL)
+  and 1610612738 (BOS), the first two teams in the loop. The task starts the
+  moment `nba.get_team_box_score`'s burst of stats.nba.com calls finishes, so the
+  throttling window it leaves behind catches the first requests. The remaining
+  28 teams answered in ~37s. The same timeouts hit 1 team on Nov 16 (CLE) and 4
+  on Nov 17 (ATL, BOS, CLE, NOP), so a single attempt was not enough.
+
+- **Fix** — retry each failed team once, after the main loop, by which point the
+  window has cleared. Only a team that fails twice is reported and raised, so a
+  genuinely broken team still fails the run.
+
 ## 2026-11-17 — `nba.team_roster`: partial fetch closed every open stint on a team
 
 Observed on `jetson-write` after the Nov 16 and Nov 17 daily runs.

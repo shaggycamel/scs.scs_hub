@@ -772,24 +772,29 @@ class NBAComponent:
         teams = self.ctx.nba_teams["id"].to_list()
 
         logger.info("nba.team_roster")
+
+        def fetch_team(team: int) -> pl.DataFrame:
+            # stats.nba.com intermittently answers CommonTeamRoster with an empty
+            # body, which nba_api surfaces as a JSONDecodeError. Treat that like
+            # any other failure so the retry and the stored-roster diff both see
+            # it, rather than writing a team with no players.
+            raw = nba_ep.commonteamroster.CommonTeamRoster(
+                season=self.ctx.cur_season_year, team_id=team
+            ).get_data_frames()[0]
+            if raw is None or len(raw) == 0:
+                raise ValueError("empty roster")
+            return pl.from_pandas(raw)
+
         dfs = []
         failed = []
         fetched = []
         for ix, team in enumerate(teams):
-            # stats.nba.com intermittently answers CommonTeamRoster with an empty
-            # body, which nba_api surfaces as a JSONDecodeError. A bad team is
-            # skipped and named rather than ending the fetch, but it must also
-            # be excluded from the stored-roster diff below: its players are
-            # absent from this run's frame, and treating them as departures
-            # would close every open stint on that team.
+            # A bad team is skipped and named rather than ending the fetch, but
+            # it must also be excluded from the stored-roster diff below: its
+            # players are absent from this run's frame, and treating them as
+            # departures would close every open stint on that team.
             try:
-                common_teamroster = nba_ep.commonteamroster.CommonTeamRoster(
-                    season=self.ctx.cur_season_year, team_id=team
-                )
-                raw = common_teamroster.get_data_frames()[0]
-                if raw is None or len(raw) == 0:
-                    raise ValueError("empty roster")
-                dfs.append(pl.from_pandas(raw))
+                dfs.append(fetch_team(team))
                 fetched.append(team)
             except Exception:
                 logger.exception("team_id %s failed", team)
@@ -798,6 +803,24 @@ class NBAComponent:
                 logger.debug("team: %d / %d", ix, len(teams))
             time.sleep(1)
         logger.debug("team: %d / %d", len(teams), len(teams))
+
+        if failed:
+            # stats.nba.com read-times-out for the first teams of a run when it
+            # is still throttling the endpoint that ran just before this one
+            # (nba.get_team_box_score). The window clears in seconds, so retry
+            # each failed team once, after the loop; only a second failure is
+            # reported and raised.
+            logger.warning("team_roster: retrying %d team(s): %s", len(failed), failed)
+            unrecovered = []
+            for team in failed:
+                time.sleep(1)
+                try:
+                    dfs.append(fetch_team(team))
+                    fetched.append(team)
+                except Exception:
+                    logger.exception("team_id %s failed again", team)
+                    unrecovered.append(team)
+            failed = unrecovered
 
         if failed:
             logger.error("team_roster: %d team(s) failed: %s", len(failed), failed)

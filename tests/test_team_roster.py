@@ -132,6 +132,57 @@ class TeamRosterFailureTest(unittest.TestCase):
         self.assertEqual(db.deleted, [])
         self.assertEqual(db.written, [])
 
+    def test_transient_failure_is_retried_and_kept(self) -> None:
+        db = FakeDB(open_rows((1, 101), (2, 201)))
+        rosters = {1: roster_frame(1, [101]), 2: roster_frame(2, [201])}
+        attempts: list[int] = []
+
+        def fetch(season: int, team_id: int) -> FakeRoster:
+            attempts.append(team_id)
+            if team_id == 2 and attempts.count(2) == 1:
+                raise TimeoutError("read timed out")
+            return FakeRoster(rosters[team_id])
+
+        with (
+            mock.patch(
+                "scs_hub.nba.nba_ep.commonteamroster.CommonTeamRoster",
+                side_effect=fetch,
+            ),
+            mock.patch("scs_hub.nba.time.sleep"),
+        ):
+            NBAComponent(db, FakeCtx()).get_team_roster()
+
+        self.assertEqual(attempts.count(2), 2)
+        self.assertIn("team_id IN (1, 2)", db.read_queries[0])
+        self.assertEqual(db.deleted, [])
+        self.assertEqual(db.written, [])
+
+    def test_retry_happens_only_once(self) -> None:
+        db = FakeDB(open_rows((1, 101), (2, 201)))
+        rosters = {1: roster_frame(1, [101])}
+        attempts: list[int] = []
+
+        def fetch(season: int, team_id: int) -> FakeRoster:
+            attempts.append(team_id)
+            if team_id == 2:
+                raise TimeoutError("read timed out")
+            return FakeRoster(rosters[team_id])
+
+        with (
+            mock.patch(
+                "scs_hub.nba.nba_ep.commonteamroster.CommonTeamRoster",
+                side_effect=fetch,
+            ),
+            mock.patch("scs_hub.nba.time.sleep"),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            NBAComponent(db, FakeCtx()).get_team_roster()
+
+        self.assertIn("BBB", str(raised.exception))
+        self.assertEqual(attempts.count(2), 2)
+        self.assertIn("team_id IN (1)", db.read_queries[0])
+        self.assertEqual(db.written, [])
+
     def test_successful_teams_still_diff(self) -> None:
         db = FakeDB(open_rows((1, 101), (1, 102), (2, 201)))
         rosters = {1: roster_frame(1, [102, 103]), 2: roster_frame(2, [201])}
